@@ -1343,12 +1343,16 @@ function SugarUI:CreateTab(config)
 	}, tabChildren)
 
 	local iconIsImage = typeof(config.Icon) == "string"
-		and (config.Icon:match("^rbxassetid://") or config.Icon:match("^http"))
+		and (config.Icon:match("^rbxassetid://") or config.Icon:match("^http") or config.Icon:match("^%d+$"))
+	local iconImageSource = config.Icon
+	if iconIsImage and config.Icon:match("^%d+$") then
+		iconImageSource = "rbxassetid://" .. config.Icon
+	end
 
 	local iconCircle
 	if iconIsImage then
 		iconCircle = new("ImageLabel", {
-			Image = config.Icon,
+			Image = iconImageSource,
 			ScaleType = Enum.ScaleType.Fit,
 			BackgroundColor3 = isFirst and Color3.fromRGB(255,255,255) or Theme.PanelAlt,
 			BackgroundTransparency = isFirst and 0.85 or 0,
@@ -1957,7 +1961,17 @@ function SugarUI:CreateDropdown(config)
 	config = config or {}
 	local callback = resolveCallback(config)
 	local options = config.Options or {}
-	local selected = config.Default or options[1]
+	local function isValidOption(value)
+		for _, opt in ipairs(options) do
+			if opt == value then return true end
+		end
+		return false
+	end
+
+	local selected = options[1]
+	if config.Default ~= nil and isValidOption(config.Default) then
+		selected = config.Default
+	end
 
 	-- Si le pasan un Player, o una tabla con campo .Name (en vez de un
 	-- texto plano), mostrar ese nombre en vez de la fea dirección de
