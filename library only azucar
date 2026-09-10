@@ -1228,15 +1228,21 @@ function SugarUI:CreateWindow(config)
 	end)
 
 	task.spawn(function()
-		TweenService:Create(Splash, TweenInfo.new(0.35), { BackgroundTransparency = 0 }):Play()
-		TweenService:Create(SplashLabel, TweenInfo.new(0.35), { TextTransparency = 0 }):Play()
-		task.wait(2)
-		TweenService:Create(SplashLabel, TweenInfo.new(0.35), { TextTransparency = 1 }):Play()
-		local fadeOut = TweenService:Create(Splash, TweenInfo.new(0.35), { BackgroundTransparency = 1 })
-		fadeOut:Play()
-		fadeOut.Completed:Wait()
-		Splash:Destroy()
+		pcall(function()
+			TweenService:Create(Splash, TweenInfo.new(0.35), { BackgroundTransparency = 0 }):Play()
+			TweenService:Create(SplashLabel, TweenInfo.new(0.35), { TextTransparency = 0 }):Play()
+			task.wait(2)
+			TweenService:Create(SplashLabel, TweenInfo.new(0.35), { TextTransparency = 1 }):Play()
+			local fadeOut = TweenService:Create(Splash, TweenInfo.new(0.35), { BackgroundTransparency = 1 })
+			fadeOut:Play()
+			fadeOut.Completed:Wait()
+		end)
 
+		pcall(function() Splash:Destroy() end)
+
+		-- Pase lo que pase arriba (incluso un error), la ventana SIEMPRE
+		-- termina abriéndose. Nunca se queda pegada en "cerrada" por un
+		-- fallo en la presentación.
 		Root.Visible = true
 		playOpenAnimation(Root, Window._targetSize, Window._targetPosition)
 	end)
