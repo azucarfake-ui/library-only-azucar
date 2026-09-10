@@ -1342,19 +1342,35 @@ function SugarUI:CreateTab(config)
 		Parent = self.SidebarList,
 	}, tabChildren)
 
-	local iconCircle = new("TextLabel", {
-		Text = config.Icon or "•",
-		Font = Theme.FontBold,
-		TextSize = 13,
-		TextColor3 = Theme.Text,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		ClipsDescendants = true,
-		BackgroundColor3 = isFirst and Color3.fromRGB(255,255,255) or Theme.PanelAlt,
-		BackgroundTransparency = isFirst and 0.85 or 0,
-		Size = UDim2.new(0, 26, 0, 26),
-		Position = UDim2.new(0, 9, 0.5, -13),
-		Parent = TabButton,
-	}, { corner(13) })
+	local iconIsImage = typeof(config.Icon) == "string"
+		and (config.Icon:match("^rbxassetid://") or config.Icon:match("^http"))
+
+	local iconCircle
+	if iconIsImage then
+		iconCircle = new("ImageLabel", {
+			Image = config.Icon,
+			ScaleType = Enum.ScaleType.Fit,
+			BackgroundColor3 = isFirst and Color3.fromRGB(255,255,255) or Theme.PanelAlt,
+			BackgroundTransparency = isFirst and 0.85 or 0,
+			Size = UDim2.new(0, 26, 0, 26),
+			Position = UDim2.new(0, 9, 0.5, -13),
+			Parent = TabButton,
+		}, { corner(13), pad(5) })
+	else
+		iconCircle = new("TextLabel", {
+			Text = config.Icon or "•",
+			Font = Theme.FontBold,
+			TextSize = 13,
+			TextColor3 = Theme.Text,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			ClipsDescendants = true,
+			BackgroundColor3 = isFirst and Color3.fromRGB(255,255,255) or Theme.PanelAlt,
+			BackgroundTransparency = isFirst and 0.85 or 0,
+			Size = UDim2.new(0, 26, 0, 26),
+			Position = UDim2.new(0, 9, 0.5, -13),
+			Parent = TabButton,
+		}, { corner(13) })
+	end
 	if not isFirst then
 		trackThemeColor(iconCircle, "BackgroundColor3", "PanelAlt")
 	end
