@@ -1347,6 +1347,8 @@ function SugarUI:CreateTab(config)
 		Font = Theme.FontBold,
 		TextSize = 13,
 		TextColor3 = Theme.Text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ClipsDescendants = true,
 		BackgroundColor3 = isFirst and Color3.fromRGB(255,255,255) or Theme.PanelAlt,
 		BackgroundTransparency = isFirst and 0.85 or 0,
 		Size = UDim2.new(0, 26, 0, 26),
@@ -1372,6 +1374,7 @@ function SugarUI:CreateTab(config)
 		TextSize = 14,
 		TextColor3 = Theme.Text,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
 		Size = UDim2.new(1, -55, 1, 0),
 		Position = UDim2.new(0, 45, 0, 0),
@@ -1940,6 +1943,19 @@ function SugarUI:CreateDropdown(config)
 	local options = config.Options or {}
 	local selected = config.Default or options[1]
 
+	-- Si le pasan un Player, o una tabla con campo .Name (en vez de un
+	-- texto plano), mostrar ese nombre en vez de la fea dirección de
+	-- memoria que da tostring() sobre una tabla/instancia cruda.
+	local function displayOption(value)
+		if typeof(value) == "Instance" and value.Name then
+			return value.Name
+		end
+		if typeof(value) == "table" and value.Name then
+			return tostring(value.Name)
+		end
+		return tostring(value)
+	end
+
 	local Row = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 44),
 		BackgroundColor3 = Theme.Panel,
@@ -1964,7 +1980,7 @@ function SugarUI:CreateDropdown(config)
 	})
 
 	local SelectedLabel = new("TextLabel", {
-		Text = tostring(selected or "—"),
+		Text = (selected ~= nil and displayOption(selected) or "—"),
 		Font = Theme.FontSemibold,
 		TextSize = 14,
 		TextColor3 = Theme.Accent,
@@ -2001,7 +2017,7 @@ function SugarUI:CreateDropdown(config)
 
 	function Dropdown:Set(option)
 		self.Value = option
-		SelectedLabel.Text = tostring(option)
+		SelectedLabel.Text = displayOption(option)
 		SugarUI.FlagValues[config.Flag] = option
 		safeCall(self, self.Callback, option)
 	end
@@ -2012,7 +2028,7 @@ function SugarUI:CreateDropdown(config)
 
 	for _, optionValue in ipairs(options) do
 		local OptionBtn = new("TextButton", {
-			Text = tostring(optionValue),
+			Text = displayOption(optionValue),
 			Font = Theme.Font,
 			TextSize = 13,
 			TextColor3 = Theme.Text,
