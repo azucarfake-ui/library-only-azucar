@@ -1,0 +1,2112 @@
+--[[
+	SugarUI
+	--------
+	Misma interfaz que PanelUI (tema oscuro, acentos rojos, badge de admin,
+	pill de servidor, sidebar con buscador/secciones/perfil, tarjetas de
+	estadísticas y accesos rápidos) — pero ahora con un NÚCLEO capaz de
+	ejecutar CUALQUIER lógica externa conectada (bucles de combate Auto-M1,
+	toggles de habilidades, sliders de configuración, dropdowns, keybinds...)
+	sin congelar jamás la interfaz ni el hilo principal del juego.
+
+	Qué cambió respecto a una librería "solo visual":
+
+	1. INVOCACIÓN ASÍNCRONA SEGURA
+	   Todo callback conectado por el usuario corre dentro de:
+	       task.spawn(function() pcall(fn, ...) end)
+	   Un `while true do ... end` dentro de un Toggle o Keybind vive en su
+	   propio hilo y NUNCA bloquea el render de la UI. Si el callback lanza
+	   un error, pcall lo atrapa y se reporta con warn(), sin romper nada.
+
+	2. CALLBACKS CON VALOR POR DEFECTO
+	   config.Callback or function() end — nunca se llama nil.
+
+	3. CONTROLADORES DINÁMICOS
+	   Cada componente interactivo devuelve un objeto con :Set(...) que
+	   actualiza la UI y dispara la lógica, para poder controlar el panel
+	   programáticamente desde tu propio script.
+
+	4. FLAGS GLOBALES
+	   config.Flag = "AutoM1" registra el controlador en SugarUI.Flags y su
+	   valor "crudo" en SugarUI.FlagValues, accesibles desde cualquier lado.
+
+	5. LIMPIEZA DE CONEXIONES
+	   Cada Window guarda todas sus RBXScriptConnections en _connections y
+	   las desconecta en :Destroy(), evitando fugas de memoria.
+
+	6. HILOS ILIMITADOS, RASTREADOS + :Stop() — SIN CARRERAS
+	   Cada vez que un controlador (Toggle, Slider, Dropdown, Keybind,
+	   Button, QuickAccess) dispara su Callback, el hilo que crea
+	   task.spawn se agrega a un CONJUNTO propio del controlador
+	   (controlador._threads), en vez de guardarse en una sola variable.
+	   Podés disparar el mismo controlador varias veces seguidas, o varios
+	   controladores distintos a la vez, y CADA lógica corre en su propio
+	   hilo independiente sin pisar ni perder de vista a las anteriores.
+	   El propio hilo se registra a sí mismo como lo primero que hace al
+	   arrancar (con coroutine.running()), así que un callback instantáneo
+	   queda igual de bien contabilizado que uno que corre por horas.
+
+	7. COLOR DE ACENTO EN CALIENTE (Azul / Rojo / Negro) — REPINTADO TOTAL
+	   Tocando el engranaje de la burbuja flotante aparece un mini menú con
+	   3 colores. Elegir uno cambia el acento de TODA la interfaz al
+	   instante, sin fallos y sin dejar ningún elemento con el color viejo:
+
+	     · Barra superior (badge, botones minimizar/cerrar)
+	     · Burbuja flotante (fondo + degradado + la piruleta)
+	     · Pestaña que está ACTIVA en este momento (las demás no cambian,
+	       ya usan el color neutro del sidebar)
+	     · Botones, sliders (relleno + valor), dropdowns (opción elegida)
+	     · Estadísticas (el número grande)
+	     · El riel de cada Toggle que esté ENCENDIDO en este momento (si
+	       está apagado, sigue con el gris neutro — no se pinta de acento)
+	     · El ícono de iniciales del perfil
+
+	   Esto se logra con un registro GENÉRICO (accentListeners): cada
+	   elemento que depende del acento se anota a sí mismo con la función
+	   exacta que necesita para repintarse (algunos son un color sólido
+	   fijo, otros dependen de su propio estado como el Toggle o la
+	   pestaña activa). Al elegir un color, SetAccentColor recorre TODA la
+	   lista y llama a cada función dentro de su propio pcall: si un solo
+	   elemento fallara o ya no existiera, el resto de la interfaz se
+	   sigue repintando igual — nunca queda la UI "a medio pintar".
+
+	Uso básico:
+
+		local SugarUI = require(script.SugarUI)
+
+		local Window = SugarUI:CreateWindow({
+			Title = "Top 1 Col",
+			Badge = "ADMIN",
+		})
+
+		local Principal = Window:CreateTab({ Name = "Principal", Icon = "P", Section = "GENERAL" })
+		local Combate    = Window:CreateTab({ Name = "Combate",   Icon = "C", Section = "ACCIONES" })
+
+		Principal:CreateStatRow()
+		Principal:CreateStat({ Value = "24", Label = "jugadores en línea" })
+
+		local AutoM1 = Combate:CreateToggle({
+			Text = "Auto-M1",
+			Flag = "AutoM1",
+			Callback = function(state)
+				while state and SugarUI.FlagValues["AutoM1"] do
+					-- tu lógica de combate aquí (puede ser CUALQUIER cosa,
+					-- de cualquier juego: no depende de SugarUI)
+					task.wait(0.1)
+				end
+			end,
+		})
+
+		-- Disparar desde afuera:
+		SugarUI.Flags["AutoM1"]:Set(true)
+
+		-- Frenar el hilo del callback a la fuerza desde afuera, sin
+		-- importar qué lógica tenga adentro:
+		AutoM1:Stop()
+
+		-- Cambiar el color de acento desde código (lo mismo que hace el
+		-- menú del engranaje) — repinta TODA la UI de una:
+		SugarUI:SetAccentColor("Azul") -- "Azul" | "Rojo" | "Negro"
+]]
+
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+
+local SugarUI = {}
+SugarUI.__index = SugarUI
+
+-- ============================================================
+-- 	PROPIEDADES DE LIBRERÍA
+-- ============================================================
+SugarUI.Version    = "1.4.0"
+SugarUI.Windows    = {}
+SugarUI.Flags      = {}   -- Flags[flagName] = controlador (con :Set, :Get, etc.)
+SugarUI.FlagValues = {}   -- FlagValues[flagName] = valor actual "crudo"
+SugarUI.Theme      = nil
+
+local function getGuiParent()
+	local ok, coreGui = pcall(function()
+		return game:GetService("CoreGui")
+	end)
+
+	if ok and coreGui then
+		local getHui = rawget(_G, "gethui")
+		if typeof(getHui) == "function" then
+			local success, hui = pcall(getHui)
+			if success and hui then
+				return hui
+			end
+		end
+	end
+
+	local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
+	local playerGui = player:WaitForChild("PlayerGui")
+	return playerGui
+end
+
+-- ============================================================
+-- 	PALETA / TEMA (arranca en rojo, igual que antes)
+-- ============================================================
+local Theme = {
+	Background      = Color3.fromRGB(46, 12, 16),
+	Sidebar         = Color3.fromRGB(42, 11, 15),
+	Panel           = Color3.fromRGB(58, 16, 20),
+	PanelAlt        = Color3.fromRGB(70, 20, 25),
+	Accent          = Color3.fromRGB(214, 38, 51),
+	AccentDim       = Color3.fromRGB(150, 26, 36),
+	Text            = Color3.fromRGB(240, 240, 242),
+	TextDim         = Color3.fromRGB(215, 215, 220),
+	TextFaint       = Color3.fromRGB(180, 180, 186),
+	Online          = Color3.fromRGB(63, 201, 141),
+	Stroke          = Color3.fromRGB(90, 30, 35),
+	Font            = Enum.Font.GothamMedium,
+	FontBold        = Enum.Font.GothamBold,
+	FontSemibold    = Enum.Font.GothamSemibold,
+
+	BackgroundTransparency = 0.35,
+	PanelTransparency       = 0.25,
+}
+
+SugarUI.Theme = Theme
+
+-- ============================================================
+-- 	COLOR DE ACENTO EN CALIENTE
+-- ============================================================
+-- 3 paletas de acento para elegir desde el engranaje de la burbuja.
+-- Solo cambian Accent/AccentDim: el resto del tema (fondo, texto, etc.)
+-- se mantiene igual, así que el cambio es puramente de "color de marca".
+local ThemePalettes = {
+	Rojo = {
+		Accent = Color3.fromRGB(214, 38, 51), AccentDim = Color3.fromRGB(150, 26, 36),
+		Background = Color3.fromRGB(46, 12, 16), Sidebar = Color3.fromRGB(42, 11, 15),
+		Panel = Color3.fromRGB(58, 16, 20), PanelAlt = Color3.fromRGB(70, 20, 25),
+		Stroke = Color3.fromRGB(90, 30, 35),
+	},
+	Azul = {
+		Accent = Color3.fromRGB(45, 130, 230), AccentDim = Color3.fromRGB(28, 88, 168),
+		Background = Color3.fromRGB(13, 19, 38), Sidebar = Color3.fromRGB(12, 17, 34),
+		Panel = Color3.fromRGB(17, 25, 46), PanelAlt = Color3.fromRGB(23, 34, 58),
+		Stroke = Color3.fromRGB(32, 48, 82),
+	},
+	Negro = {
+		Accent = Color3.fromRGB(80, 80, 86), AccentDim = Color3.fromRGB(40, 40, 44),
+		Background = Color3.fromRGB(20, 20, 22), Sidebar = Color3.fromRGB(18, 18, 20),
+		Panel = Color3.fromRGB(26, 26, 29), PanelAlt = Color3.fromRGB(34, 34, 38),
+		Stroke = Color3.fromRGB(46, 46, 50),
+	},
+}
+SugarUI.ThemePalettes = ThemePalettes
+SugarUI.CurrentPalette = "Rojo"
+
+-- Registro GENÉRICO de todo lo que depende del color de acento: cada
+-- entrada es una función sin argumentos que sabe repintarse a sí misma
+-- leyendo el Theme.Accent/AccentDim ACTUAL en el momento en que se la
+-- llama. Esto es lo que garantiza que TODA la interfaz cambie de color de
+-- una sola vez y sin fallos: no importa si el elemento es un color sólido,
+-- un degradado, o algo que además depende de un estado propio (como el
+-- riel de un Toggle prendido/apagado, o qué pestaña está activa ahora
+-- mismo) — cada uno se registra con la lógica exacta que necesita.
+local accentListeners = {}
+
+local function onAccentChanged(fn)
+	table.insert(accentListeners, fn)
+	return fn
+end
+
+-- Atajo para el caso más común: una propiedad de color sólido (ej.
+-- BackgroundColor3 de un botón) que siempre debe pasar a ser Theme.Accent.
+-- Versión genérica: engancha CUALQUIER propiedad de color de CUALQUIER
+-- instancia a CUALQUIER clave del Theme (no solo Accent). Esto es lo que
+-- permite que, además del acento, los FONDOS (Background/Sidebar/Panel/
+-- PanelAlt) también se repinten al elegir una paleta.
+local function trackThemeColor(inst, prop, themeKey)
+	prop = prop or "BackgroundColor3"
+	themeKey = themeKey or "Accent"
+	onAccentChanged(function()
+		if inst and inst.Parent then
+			inst[prop] = Theme[themeKey]
+		end
+	end)
+	return inst
+end
+
+local function trackAccentColor(inst, prop)
+	return trackThemeColor(inst, prop, "Accent")
+end
+
+-- ============================================================
+-- 	HELPERS
+-- ============================================================
+local function new(class, props, children)
+	local inst = Instance.new(class)
+	for prop, value in pairs(props or {}) do
+		inst[prop] = value
+	end
+	for _, child in ipairs(children or {}) do
+		child.Parent = inst
+	end
+	return inst
+end
+
+local function corner(radius)
+	return new("UICorner", { CornerRadius = UDim.new(0, radius or 10) })
+end
+
+local function stroke(color, thickness)
+	-- "Dinámico" = no se pasó color, O se pasó explícitamente el
+	-- Theme.Stroke actual (que es como está escrito el 99% del código:
+	-- stroke(Theme.Stroke, 1)). Solo se queda fijo si de verdad se pasa
+	-- un color DISTINTO al de Theme.Stroke (ej. un stroke a medida).
+	local wantsDynamic = (color == nil) or (color == Theme.Stroke)
+	local s = new("UIStroke", { Color = color or Theme.Stroke, Thickness = thickness or 1 })
+	if wantsDynamic then
+		onAccentChanged(function()
+			if s and s.Parent then
+				s.Color = Theme.Stroke
+			end
+		end)
+	end
+	return s
+end
+
+local function pad(all, top, right, bottom, left)
+	return new("UIPadding", {
+		PaddingTop    = UDim.new(0, top or all or 0),
+		PaddingRight  = UDim.new(0, right or all or 0),
+		PaddingBottom = UDim.new(0, bottom or all or 0),
+		PaddingLeft   = UDim.new(0, left or all or 0),
+	})
+end
+
+local function hoverTint(guiObject, baseColor, hoverColor)
+	guiObject.MouseEnter:Connect(function()
+		TweenService:Create(guiObject, TweenInfo.new(0.12), { BackgroundColor3 = hoverColor }):Play()
+	end)
+	guiObject.MouseLeave:Connect(function()
+		TweenService:Create(guiObject, TweenInfo.new(0.12), { BackgroundColor3 = baseColor }):Play()
+	end)
+end
+
+-- FIX color de acento "que se queda pegado": hoverTint normal recibe
+-- baseColor/hoverColor como valores FIJOS, capturados en el instante en
+-- que se llama. Para botones cuyo color depende del acento (Minimizar,
+-- Cerrar, la Burbuja, los Botones normales) eso es un bug: al cambiar de
+-- paleta con SugarUI:SetAccentColor, trackAccentColor los repinta bien
+-- por un instante, pero el primer MouseEnter/MouseLeave los vuelve a
+-- pintar con el rojo (u otro color) que tenían guardado desde que se
+-- crearon, no con el actual. hoverAccentTint lee Theme.Accent/AccentDim
+-- DENTRO del propio evento, en el momento exacto en que se dispara, así
+-- siempre usa el color de acento que esté activo en ese momento.
+local function hoverAccentTint(guiObject)
+	guiObject.MouseEnter:Connect(function()
+		TweenService:Create(guiObject, TweenInfo.new(0.12), { BackgroundColor3 = Theme.AccentDim }):Play()
+	end)
+	guiObject.MouseLeave:Connect(function()
+		TweenService:Create(guiObject, TweenInfo.new(0.12), { BackgroundColor3 = Theme.Accent }):Play()
+	end)
+end
+
+-- Igual que hoverAccentTint pero para pares de colores de FONDO (Panel/
+-- PanelAlt, Sidebar/PanelAlt, etc.) que ahora también cambian de paleta.
+-- Lee Theme[baseKey]/Theme[hoverKey] en el momento del hover, nunca un
+-- valor viejo capturado desde que se creó el elemento.
+local function hoverThemeTint(guiObject, baseKey, hoverKey)
+	guiObject.MouseEnter:Connect(function()
+		TweenService:Create(guiObject, TweenInfo.new(0.12), { BackgroundColor3 = Theme[hoverKey] }):Play()
+	end)
+	guiObject.MouseLeave:Connect(function()
+		TweenService:Create(guiObject, TweenInfo.new(0.12), { BackgroundColor3 = Theme[baseKey] }):Play()
+	end)
+end
+
+local function pressFeedback(guiObject)
+	local originalSize = guiObject.Size
+	local pressedSize = originalSize - UDim2.new(0, 4, 0, 2)
+	local isPressed = false
+
+	guiObject.MouseButton1Down:Connect(function()
+		isPressed = true
+		TweenService:Create(guiObject, TweenInfo.new(0.06), { Size = pressedSize }):Play()
+	end)
+
+	local function restore()
+		if not isPressed then return end
+		isPressed = false
+		TweenService:Create(guiObject, TweenInfo.new(0.08), { Size = originalSize }):Play()
+	end
+	guiObject.MouseButton1Up:Connect(restore)
+	guiObject.MouseLeave:Connect(restore)
+end
+
+-- accentGradient() queda igual para quien ya la use, pero ahora se
+-- registra a través de onAccentChanged para poder recolorearse al cambiar
+-- de paleta (ver SugarUI:SetAccentColor más abajo).
+local function accentGradient(rotation)
+	local g = new("UIGradient", { Color = ColorSequence.new(Theme.Accent, Theme.AccentDim), Rotation = rotation or 90 })
+	onAccentChanged(function()
+		if g and g.Parent then
+			g.Color = ColorSequence.new(Theme.Accent, Theme.AccentDim)
+		end
+	end)
+	return g
+end
+
+-- Cambia el color de acento de TODA la interfaz YA CONSTRUIDA (topbar,
+-- burbuja, botones, sliders, dropdowns, estadísticas, la pestaña que esté
+-- activa en este momento, los toggles que estén encendidos, el ícono de
+-- perfil, la piruleta de la burbuja...) en un solo paso, y de cualquier
+-- cosa que se cree después (los nuevos elementos leen
+-- Theme.Accent/AccentDim al momento de crearse). paletteName: "Azul" |
+-- "Rojo" | "Negro".
+--
+-- Recorre accentListeners con un pcall POR ENTRADA: si un elemento puntual
+-- ya fue destruido o falla al repintarse, el resto de la interfaz se sigue
+-- repintando igual — un elemento roto nunca deja el resto del panel a
+-- medio pintar ni corta el cambio de color a la mitad.
+function SugarUI:SetAccentColor(paletteName)
+	local palette = ThemePalettes[paletteName]
+	if not palette then
+		warn("[SugarUI] Paleta de color desconocida: " .. tostring(paletteName))
+		return
+	end
+
+	SugarUI.CurrentPalette = paletteName
+	Theme.Accent     = palette.Accent
+	Theme.AccentDim  = palette.AccentDim
+	Theme.Background = palette.Background
+	Theme.Sidebar    = palette.Sidebar
+	Theme.Panel      = palette.Panel
+	Theme.PanelAlt   = palette.PanelAlt
+	Theme.Stroke     = palette.Stroke
+
+	for _, listener in ipairs(accentListeners) do
+		pcall(listener)
+	end
+end
+
+-- ============================================================
+-- 	NÚCLEO: INVOCACIÓN ASÍNCRONA SEGURA (CONCURRENCIA ILIMITADA)
+-- ============================================================
+local function safeCall(controller, fn, ...)
+	fn = fn or function() end
+	if typeof(fn) ~= "function" then
+		return nil
+	end
+
+	local args = table.pack(...)
+
+	if controller then
+		controller._threads = controller._threads or {}
+	end
+
+	local thread = task.spawn(function()
+		local self = coroutine.running()
+		if controller then
+			controller._threads[self] = true
+		end
+
+		local ok, err = pcall(function()
+			fn(table.unpack(args, 1, args.n))
+		end)
+		if not ok then
+			warn("[SugarUI] Error en callback conectado por el usuario: " .. tostring(err))
+		end
+
+		if controller and controller._threads then
+			controller._threads[self] = nil
+		end
+	end)
+
+	return thread
+end
+
+local function stopThread(controller)
+	if not controller._threads then return end
+	for thread in pairs(controller._threads) do
+		pcall(task.cancel, thread)
+	end
+	table.clear(controller._threads)
+end
+
+-- ============================================================
+-- 	ADAPTADOR DE LÓGICA EXTERNA
+-- ============================================================
+local function resolveCallback(config)
+	if typeof(config.Callback) == "function" then
+		return config.Callback
+	end
+
+	local logic = config.Logic
+	if logic == nil then
+		return function() end
+	end
+
+	if typeof(logic) == "function" then
+		return logic
+	end
+
+	if typeof(logic) == "table" then
+		return function(value)
+			if typeof(value) == "boolean" then
+				if value and typeof(logic.Enable) == "function" then
+					logic.Enable()
+					return
+				elseif not value and typeof(logic.Disable) == "function" then
+					logic.Disable()
+					return
+				end
+			end
+			if typeof(logic.Toggle) == "function" then
+				logic.Toggle(value)
+			elseif typeof(logic.Set) == "function" then
+				logic.Set(value)
+			elseif typeof(logic.Run) == "function" then
+				logic.Run(value)
+			else
+				warn("[SugarUI] Logic conectada no tiene :Toggle/:Enable+Disable/:Set/:Run — revisá el nombre del método.")
+			end
+		end
+	end
+
+	return function() end
+end
+
+-- Animación de apertura tipo "encender la tele": la ventana arranca
+-- como una línea fina horizontal, centrada verticalmente donde va a
+-- terminar, y se estira hacia arriba y abajo hasta su tamaño real.
+local function playOpenAnimation(root, targetSize, targetPosition)
+	root.Size = UDim2.new(targetSize.X.Scale, targetSize.X.Offset, 0, 2)
+	root.Position = UDim2.new(
+		targetPosition.X.Scale, targetPosition.X.Offset,
+		targetPosition.Y.Scale, targetPosition.Y.Offset + targetSize.Y.Offset / 2
+	)
+	TweenService:Create(root, TweenInfo.new(1.0, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+		Size = targetSize,
+		Position = targetPosition,
+	}):Play()
+end
+
+local function registerFlag(flagName, controller, initialValue)
+	if not flagName then return end
+	SugarUI.Flags[flagName] = controller
+	SugarUI.FlagValues[flagName] = initialValue
+end
+
+-- ============================================================
+-- 	CREATE WINDOW
+-- ============================================================
+function SugarUI:CreateWindow(config)
+	config = config or {}
+
+	local ScreenGui = new("ScreenGui", {
+		Name = config.Title or "SugarUI",
+		ResetOnSpawn = false,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		DisplayOrder = 999,
+		IgnoreGuiInset = true,
+	})
+
+	local protectGui = rawget(_G, "protectgui") or rawget(_G, "protect_gui")
+	if typeof(protectGui) == "function" then
+		pcall(protectGui, ScreenGui)
+	end
+
+	ScreenGui.Parent = getGuiParent()
+
+	local Root = new("Frame", {
+		Name = "Root",
+		Size = config.Size or UDim2.new(0, 640, 0, 440),
+		Position = config.Position or UDim2.new(0.5, -320, 0.5, -220),
+		BackgroundColor3 = config.BackgroundColor or Theme.Background,
+		BackgroundTransparency = config.BackgroundTransparency or Theme.BackgroundTransparency,
+		ClipsDescendants = true,
+		Parent = ScreenGui,
+	}, { corner(22), stroke(Theme.Stroke, 1) })
+	if not config.BackgroundColor then
+		trackThemeColor(Root, "BackgroundColor3", "Background")
+	end
+
+	local MARGIN = 12
+	local GAP = 10
+	local TOPBAR_H = 54
+	local SIDEBAR_W = 190
+	local ROW_Y = MARGIN + TOPBAR_H + GAP
+
+	-- ---------------- Barra superior ----------------
+	local TopBar = new("Frame", {
+		Name = "TopBar",
+		Size = UDim2.new(1, -MARGIN * 2, 0, TOPBAR_H),
+		Position = UDim2.new(0, MARGIN, 0, MARGIN),
+		BackgroundColor3 = Theme.Sidebar,
+		BackgroundTransparency = Theme.PanelTransparency,
+		Parent = Root,
+	}, { corner(16), stroke(Theme.Stroke, 1) })
+	trackThemeColor(TopBar, "BackgroundColor3", "Sidebar")
+
+	local TopBarLeft = new("Frame", {
+		Name = "TopBarLeft",
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 0, 32),
+		Position = UDim2.new(0, 20, 0.5, -16),
+		BackgroundTransparency = 1,
+		Parent = TopBar,
+	}, {
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 12),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+
+	new("TextLabel", {
+		Text = config.Title or "Panel",
+		Font = Theme.FontBold,
+		TextSize = 18,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 0, 22),
+		LayoutOrder = 1,
+		Parent = TopBarLeft,
+	})
+
+	if config.Badge then
+		local Badge = new("TextLabel", {
+			Text = config.Badge,
+			Font = Theme.FontBold,
+			TextSize = 11,
+			TextColor3 = Theme.Text,
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextYAlignment = Enum.TextYAlignment.Center,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			BackgroundColor3 = Theme.Accent,
+			ClipsDescendants = true,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.new(0, 0, 0, 22),
+			LayoutOrder = 2,
+			Parent = TopBarLeft,
+		}, {
+			corner(11),
+			accentGradient(),
+			pad(0, 0, 10, 0, 10),
+			new("UISizeConstraint", { MaxSize = Vector2.new(150, 22) }),
+		})
+		trackAccentColor(Badge, "BackgroundColor3")
+	end
+
+	local ServerPill = new("Frame", {
+		Size = UDim2.new(0, 150, 0, 32),
+		BackgroundColor3 = Theme.PanelAlt,
+		LayoutOrder = 3,
+		Parent = TopBarLeft,
+	}, { corner(16), stroke(Theme.Stroke, 1) })
+	trackThemeColor(ServerPill, "BackgroundColor3", "PanelAlt")
+
+	new("TextLabel", {
+		Text = "Azucar UI",
+		Font = Theme.FontSemibold,
+		TextSize = 13,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		Parent = ServerPill,
+	})
+
+	local MinimizeBtn = new("TextButton", {
+		Text = "—",
+		Font = Theme.FontBold,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.Accent,
+		Size = UDim2.new(0, 32, 0, 32),
+		Position = UDim2.new(1, -80, 0.5, -16),
+		Parent = TopBar,
+	}, { corner(16), accentGradient() })
+	trackAccentColor(MinimizeBtn, "BackgroundColor3")
+
+	local CloseBtn = new("TextButton", {
+		Text = "✕",
+		Font = Theme.FontBold,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.Accent,
+		Size = UDim2.new(0, 32, 0, 32),
+		Position = UDim2.new(1, -40, 0.5, -16),
+		Parent = TopBar,
+	}, { corner(16), accentGradient() })
+	trackAccentColor(CloseBtn, "BackgroundColor3")
+
+	hoverAccentTint(MinimizeBtn)
+	hoverAccentTint(CloseBtn)
+	pressFeedback(MinimizeBtn)
+	pressFeedback(CloseBtn)
+
+	-- ---------------- Sidebar ----------------
+	local Sidebar = new("Frame", {
+		Name = "Sidebar",
+		Size = UDim2.new(0, SIDEBAR_W, 1, -(ROW_Y + MARGIN)),
+		Position = UDim2.new(0, MARGIN, 0, ROW_Y),
+		BackgroundColor3 = Theme.Sidebar,
+		BackgroundTransparency = Theme.PanelTransparency,
+		Parent = Root,
+	}, { corner(16), stroke(Theme.Stroke, 1) })
+	trackThemeColor(Sidebar, "BackgroundColor3", "Sidebar")
+
+	local SearchBox = new("TextBox", {
+		PlaceholderText = "Buscar pestaña...",
+		Text = "",
+		Font = Theme.Font,
+		TextSize = 13,
+		TextColor3 = Theme.Text,
+		PlaceholderColor3 = Theme.TextFaint,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ClearTextOnFocus = false,
+		ClipsDescendants = true,
+		BackgroundColor3 = Theme.PanelAlt,
+		Size = UDim2.new(1, -32, 0, 36),
+		Position = UDim2.new(0, 16, 0, 16),
+		Parent = Sidebar,
+	}, { corner(18), pad(0, 0, 0, 0, 12), stroke(Theme.Stroke, 1) })
+	trackThemeColor(SearchBox, "BackgroundColor3", "PanelAlt")
+
+	local SidebarList = new("ScrollingFrame", {
+		Name = "SidebarList",
+		Size = UDim2.new(1, 0, 1, -142),
+		Position = UDim2.new(0, 0, 0, 66),
+		BackgroundTransparency = 1,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = Theme.Stroke,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = Sidebar,
+	}, {
+		new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
+		pad(0, 4, 16, 16, 16),
+	})
+
+	-- ---------------- Tarjeta de perfil ----------------
+	new("Frame", {
+		Size = UDim2.new(1, -32, 0, 1),
+		Position = UDim2.new(0, 16, 1, -78),
+		BackgroundColor3 = Theme.Stroke,
+		Parent = Sidebar,
+	})
+
+	local ProfileRow = new("Frame", {
+		Name = "ProfileRow",
+		Size = UDim2.new(1, -32, 0, 46),
+		Position = UDim2.new(0, 16, 1, -60),
+		BackgroundTransparency = 1,
+		Parent = Sidebar,
+	})
+
+	-- ---------------- Área de contenido ----------------
+	local Content = new("Frame", {
+		Name = "Content",
+		Size = UDim2.new(1, -(MARGIN + SIDEBAR_W + GAP + MARGIN), 1, -(ROW_Y + MARGIN)),
+		Position = UDim2.new(0, MARGIN + SIDEBAR_W + GAP, 0, ROW_Y),
+		BackgroundColor3 = Theme.Panel,
+		BackgroundTransparency = Theme.PanelTransparency,
+		Parent = Root,
+	}, { corner(16), stroke(Theme.Stroke, 1) })
+	trackThemeColor(Content, "BackgroundColor3", "Panel")
+
+	local ContentScroll = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 1, 0),
+		BackgroundTransparency = 1,
+		ScrollBarThickness = 6,
+		ScrollBarImageColor3 = Theme.Accent,
+		VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = Content,
+	}, {
+		new("UIListLayout", { Padding = UDim.new(0, 20), SortOrder = Enum.SortOrder.LayoutOrder }),
+		pad(0, 20, 20, 20, 20),
+	})
+	trackAccentColor(ContentScroll, "ScrollBarImageColor3")
+
+	-- ---------------- Burbuja flotante ----------------
+	local BUBBLE_H = 44
+
+	local Bubble = new("TextButton", {
+		Name = "Bubble",
+		Text = "",
+		AutoButtonColor = false,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 0, BUBBLE_H),
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 20),
+		BackgroundColor3 = Theme.Accent,
+		Visible = false,
+		Parent = ScreenGui,
+	}, {
+		corner(BUBBLE_H // 2),
+		stroke(Theme.Stroke, 1),
+		accentGradient(135),
+		pad(0, 0, 16, 0, 16),
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 8),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+	trackAccentColor(Bubble, "BackgroundColor3")
+
+	local function buildReticle(parent, size, color, layoutOrder)
+		local box = new("Frame", {
+			Size = UDim2.new(0, size, 0, size),
+			BackgroundTransparency = 1,
+			LayoutOrder = layoutOrder,
+			Parent = parent,
+		})
+		local thickness = 2
+		local armLen = math.floor(size * 0.42)
+		local specs = {
+			{ armLen, thickness, 0, 0 },                             { thickness, armLen, 0, 0 },
+			{ armLen, thickness, size - armLen, 0 },                 { thickness, armLen, size - thickness, 0 },
+			{ armLen, thickness, 0, size - thickness },              { thickness, armLen, 0, size - armLen },
+			{ armLen, thickness, size - armLen, size - thickness },  { thickness, armLen, size - thickness, size - armLen },
+		}
+		for _, s in ipairs(specs) do
+			new("Frame", {
+				Size = UDim2.new(0, s[1], 0, s[2]),
+				Position = UDim2.new(0, s[3], 0, s[4]),
+				BackgroundColor3 = color,
+				BorderSizePixel = 0,
+				Parent = box,
+			})
+		end
+		return box
+	end
+
+	-- Paleta (dulce) — la cabeza usa un degradado que MEZCLA el acento
+	-- actual con tonos rosas fijos. El degradado se guarda en una
+	-- variable (LollipopGradient) y se re-registra en accentListeners
+	-- para poder reconstruirse con el Accent/AccentDim nuevo cada vez que
+	-- se cambia de paleta — antes esto NO pasaba (se armaba una sola vez
+	-- con `new("UIGradient", ...)` directo) y por eso la piruleta se
+	-- quedaba con el rojo viejo aunque el resto de la UI ya fuera azul.
+	local function buildLollipop(parent, size, layoutOrder)
+		local box = new("Frame", {
+			Size = UDim2.new(0, size, 0, size + 12),
+			BackgroundTransparency = 1,
+			LayoutOrder = layoutOrder,
+			Parent = parent,
+		})
+
+		new("Frame", {
+			Size = UDim2.new(0, 2, 0, 12),
+			Position = UDim2.new(0.5, 4, 0, size - 6),
+			Rotation = -16,
+			BackgroundColor3 = Color3.fromRGB(232, 222, 208),
+			Parent = box,
+		}, { corner(1) })
+
+		local function buildLollipopSequence()
+			return ColorSequence.new({
+				ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 182, 210)),
+				ColorSequenceKeypoint.new(0.25, Theme.Accent),
+				ColorSequenceKeypoint.new(0.50, Color3.fromRGB(255, 121, 170)),
+				ColorSequenceKeypoint.new(0.75, Theme.AccentDim),
+				ColorSequenceKeypoint.new(1.00, Color3.fromRGB(255, 182, 210)),
+			})
+		end
+
+		local LollipopGradient = new("UIGradient", {
+			Color = buildLollipopSequence(),
+			Rotation = 35,
+		})
+
+		new("Frame", {
+			Size = UDim2.new(0, size, 0, size),
+			Position = UDim2.new(0, 1, 0, 2),
+			BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+			BackgroundTransparency = 0.8,
+			ZIndex = 0,
+			Parent = box,
+		}, { corner(size / 2) })
+
+		local Head = new("Frame", {
+			Size = UDim2.new(0, size, 0, size),
+			BackgroundColor3 = Color3.fromRGB(255, 133, 178),
+			ClipsDescendants = true,
+			Parent = box,
+		}, {
+			corner(size / 2),
+			stroke(Theme.Stroke, 1),
+			LollipopGradient,
+		})
+
+		onAccentChanged(function()
+			if LollipopGradient and LollipopGradient.Parent then
+				LollipopGradient.Color = buildLollipopSequence()
+			end
+		end)
+
+		new("Frame", {
+			Size = UDim2.new(0, size * 0.28, 0, size * 0.16),
+			Position = UDim2.new(0, size * 0.16, 0, size * 0.12),
+			Rotation = -20,
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 0.35,
+			Parent = Head,
+		}, { corner(6) })
+
+		new("Frame", {
+			Size = UDim2.new(0, size * 0.1, 0, size * 0.1),
+			Position = UDim2.new(0, size * 0.62, 0, size * 0.56),
+			BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 0.55,
+			Parent = Head,
+		}, { corner(3) })
+
+		return box
+	end
+
+	local function bubbleSlash(layoutOrder)
+		new("TextLabel", {
+			Text = "/",
+			Font = Theme.FontSemibold,
+			TextSize = 15,
+			TextColor3 = Theme.TextDim,
+			BackgroundTransparency = 1,
+			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.new(0, 0, 1, 0),
+			LayoutOrder = layoutOrder,
+			Parent = Bubble,
+		})
+	end
+
+	local GearButton = new("TextButton", {
+		Name = "GearButton",
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 20, 0, 20),
+		LayoutOrder = 1,
+		ZIndex = 3,
+		Parent = Bubble,
+	})
+
+	do
+		local ringSize = 10
+		new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, 0),
+			Size = UDim2.new(0, ringSize, 0, ringSize),
+			BackgroundTransparency = 1,
+			ZIndex = 3,
+			Parent = GearButton,
+		}, { corner(ringSize / 2), stroke(Theme.Text, 2) })
+
+		new("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.new(0.5, 0, 0.5, 0),
+			Size = UDim2.new(0, 3, 0, 3),
+			BackgroundColor3 = Theme.Text,
+			ZIndex = 3,
+			Parent = GearButton,
+		}, { corner(2) })
+
+		-- 4 dientes en cruz, sin rotación ni trigonometría: solo rectángulos
+		-- rectos arriba/abajo/izquierda/derecha con números enteros exactos
+		-- (encajan pixel a pixel en el cuadro de 20x20), así nunca queda
+		-- ninguno "corrido" o torcido por redondeo de píxeles.
+		local armW, armH, gap = 3, 4, 1
+		local specs = {
+			{ 10 - armW / 2, 0 },                          -- arriba
+			{ 10 - armW / 2, 20 - armH },                   -- abajo
+		}
+		for _, s in ipairs(specs) do
+			new("Frame", {
+				Name = "Tooth",
+				Position = UDim2.new(0, s[1], 0, s[2]),
+				Size = UDim2.new(0, armW, 0, armH),
+				BackgroundColor3 = Theme.Text,
+				BorderSizePixel = 0,
+				ZIndex = 3,
+				Parent = GearButton,
+			})
+		end
+		local hSpecs = {
+			{ 0, 10 - armW / 2 },                           -- izquierda
+			{ 20 - armH, 10 - armW / 2 },                   -- derecha
+		}
+		for _, s in ipairs(hSpecs) do
+			new("Frame", {
+				Name = "Tooth",
+				Position = UDim2.new(0, s[1], 0, s[2]),
+				Size = UDim2.new(0, armH, 0, armW),
+				BackgroundColor3 = Theme.Text,
+				BorderSizePixel = 0,
+				ZIndex = 3,
+				Parent = GearButton,
+			})
+		end
+
+		-- 4 dientes diagonales (cuadraditos en las esquinas, sin rotación
+		-- tampoco) para completar 8 dientes en total.
+		local diagSize = 3
+		local diagSpecs = {
+			{ 3, 3 },   -- arriba-izquierda
+			{ 14, 3 },  -- arriba-derecha
+			{ 3, 14 },  -- abajo-izquierda
+			{ 14, 14 }, -- abajo-derecha
+		}
+		for _, s in ipairs(diagSpecs) do
+			new("Frame", {
+				Name = "Tooth",
+				Position = UDim2.new(0, s[1], 0, s[2]),
+				Size = UDim2.new(0, diagSize, 0, diagSize),
+				BackgroundColor3 = Theme.Text,
+				BorderSizePixel = 0,
+				ZIndex = 3,
+				Parent = GearButton,
+			})
+		end
+	end
+
+	local ColorMenu = new("Frame", {
+		Name = "ColorMenu",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Size = UDim2.new(0, 140, 0, 48),
+		Position = UDim2.new(0.5, 0, 1, 10),
+		BackgroundColor3 = Theme.PanelAlt,
+		Visible = false,
+		ZIndex = 10,
+		Parent = GearButton,
+	}, {
+		corner(14),
+		stroke(Theme.Stroke, 1),
+		pad(8),
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 10),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+	trackThemeColor(ColorMenu, "BackgroundColor3", "PanelAlt")
+
+	-- Las muestras de color del menú (colorSwatch) usan a propósito el
+	-- color FIJO de cada paleta (ThemePalettes[paletteName].Accent) y NO
+	-- se registran en accentListeners: tienen que seguir mostrando
+	-- "así se ve el azul" / "así se ve el rojo" sin importar cuál esté
+	-- activo en este momento, para que el menú siga sirviendo de selector.
+	local function colorSwatch(paletteName, layoutOrder)
+		local swatch = new("TextButton", {
+			Name = paletteName,
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundColor3 = ThemePalettes[paletteName].Accent,
+			Size = UDim2.new(0, 28, 0, 28),
+			ZIndex = 11,
+			LayoutOrder = layoutOrder,
+			Parent = ColorMenu,
+		}, { corner(14), stroke(Theme.Text, 1) })
+
+		swatch.MouseButton1Click:Connect(function()
+			SugarUI:SetAccentColor(paletteName)
+			ColorMenu.Visible = false
+		end)
+		hoverTint(swatch, ThemePalettes[paletteName].Accent, ThemePalettes[paletteName].AccentDim)
+		return swatch
+	end
+
+	colorSwatch("Azul", 1)
+	colorSwatch("Rojo", 2)
+	colorSwatch("Negro", 3)
+
+	GearButton.MouseButton1Click:Connect(function()
+		ColorMenu.Visible = not ColorMenu.Visible
+	end)
+
+	bubbleSlash(2)
+	buildLollipop(Bubble, 18, 3)
+	bubbleSlash(4)
+	buildReticle(Bubble, 20, Theme.Text, 5)
+
+	hoverAccentTint(Bubble)
+
+	-- ============================================================
+	local Window = setmetatable({
+		ScreenGui = ScreenGui,
+		Root = Root,
+		Sidebar = Sidebar,
+		SidebarList = SidebarList,
+		ProfileRow = ProfileRow,
+		Content = Content,
+		ContentScroll = ContentScroll,
+		Bubble = Bubble,
+		_tabs = {},
+		_sections = {},
+		_connections = {},
+		_targetSize = Root.Size,
+		_targetPosition = Root.Position,
+	}, SugarUI)
+
+	local function track(conn)
+		table.insert(Window._connections, conn)
+		return conn
+	end
+
+	track(Bubble.MouseButton1Click:Connect(function()
+		Window:Show()
+	end))
+
+	do
+		local dragging = false
+		local dragStart, startPos
+		track(Bubble.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startPos = Bubble.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						dragging = false
+					end
+				end)
+			end
+		end))
+		track(UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+				or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				Bubble.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end))
+	end
+
+	track(MinimizeBtn.MouseButton1Click:Connect(function()
+		Window:Hide()
+		safeCall(nil, Window.OnMinimize)
+	end))
+	track(CloseBtn.MouseButton1Click:Connect(function()
+		Window:Hide()
+		safeCall(nil, Window.OnClose)
+	end))
+
+	do
+		local dragging = false
+		local dragStart, startPos
+
+		track(TopBar.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startPos = Root.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						dragging = false
+					end
+				end)
+			end
+		end))
+
+		track(UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+				or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				Root.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end))
+	end
+
+	local toggleKey = config.ToggleKey or Enum.KeyCode.K
+	track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if gameProcessed then return end
+		if input.KeyCode == toggleKey then
+			Window:Toggle()
+		end
+	end))
+
+	-- Deja la ventana ya en su forma "línea finita" (el estado inicial de
+	-- la animación de apertura) pre-cargada, por si algo más (la tecla K,
+	-- un Show() externo) la abre antes de tiempo durante la presentación
+	-- — así al menos animaría bien en vez de aparecer de golpe a tamaño
+	-- completo. Pero se OCULTA de verdad mientras tanto, para que no se
+	-- vea la rayita fina de fondo.
+	Root.Visible = false
+	Root.Size = UDim2.new(Window._targetSize.X.Scale, Window._targetSize.X.Offset, 0, 2)
+	Root.Position = UDim2.new(
+		Window._targetPosition.X.Scale, Window._targetPosition.X.Offset,
+		Window._targetPosition.Y.Scale, Window._targetPosition.Y.Offset + Window._targetSize.Y.Offset / 2
+	)
+
+	local SPLASH_H = 58
+	local Splash = new("TextButton", {
+		Name = "Splash",
+		Text = "",
+		Active = false,
+		AutoButtonColor = false,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 0, SPLASH_H),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 0, 0.5, 0),
+		BackgroundColor3 = Theme.Accent,
+		BackgroundTransparency = 1,
+		ZIndex = 500,
+		Parent = ScreenGui,
+	}, {
+		corner(SPLASH_H // 2),
+		stroke(Theme.Stroke, 1),
+		accentGradient(135),
+		pad(0, 0, 26, 0, 26),
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			Padding = UDim.new(0, 16),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+	trackAccentColor(Splash, "BackgroundColor3")
+
+	local SplashLabel = new("TextLabel", {
+		Text = "Sugar UI by azucarfake00",
+		Font = Theme.FontBold,
+		TextSize = 20,
+		TextColor3 = Theme.Text,
+		TextTransparency = 1,
+		BackgroundTransparency = 1,
+		ZIndex = 501,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 1, 0),
+		LayoutOrder = 1,
+		Parent = Splash,
+	})
+
+	-- Spinner: un aro incompleto (UIStroke + UIGradient de transparencia
+	-- que "corta" un tramo del círculo) que gira sin parar mientras
+	-- carga. No usa ninguna imagen — todo hecho con formas de Roblox.
+	local Spinner = new("Frame", {
+		Name = "Spinner",
+		Size = UDim2.new(0, 28, 0, 28),
+		BackgroundTransparency = 1,
+		ZIndex = 501,
+		LayoutOrder = 2,
+		Parent = Splash,
+	})
+
+	local DOT_COUNT, DOT_SIZE, RADIUS = 8, 5, 10
+	for i = 0, DOT_COUNT - 1 do
+		local rad = math.rad(i * (360 / DOT_COUNT))
+		new("Frame", {
+			Name = "Dot",
+			Size = UDim2.new(0, DOT_SIZE, 0, DOT_SIZE),
+			Position = UDim2.new(0, 14 + math.cos(rad) * RADIUS - DOT_SIZE / 2, 0, 14 + math.sin(rad) * RADIUS - DOT_SIZE / 2),
+			BackgroundColor3 = Color3.fromRGB(255, 70, 80),
+			BackgroundTransparency = i / DOT_COUNT * 0.85,
+			BorderSizePixel = 0,
+			ZIndex = 501,
+			Parent = Spinner,
+		}, { corner(DOT_SIZE / 2) })
+	end
+
+	task.spawn(function()
+		while Spinner and Spinner.Parent do
+			local spin = TweenService:Create(Spinner, TweenInfo.new(0.8, Enum.EasingStyle.Linear), { Rotation = Spinner.Rotation + 360 })
+			spin:Play()
+			spin.Completed:Wait()
+		end
+	end)
+
+	task.spawn(function()
+		TweenService:Create(Splash, TweenInfo.new(0.35), { BackgroundTransparency = 0 }):Play()
+		TweenService:Create(SplashLabel, TweenInfo.new(0.35), { TextTransparency = 0 }):Play()
+		task.wait(2)
+		TweenService:Create(SplashLabel, TweenInfo.new(0.35), { TextTransparency = 1 }):Play()
+		local fadeOut = TweenService:Create(Splash, TweenInfo.new(0.35), { BackgroundTransparency = 1 })
+		fadeOut:Play()
+		fadeOut.Completed:Wait()
+		Splash:Destroy()
+
+		Root.Visible = true
+		playOpenAnimation(Root, Window._targetSize, Window._targetPosition)
+	end)
+
+	table.insert(SugarUI.Windows, Window)
+	return Window
+end
+
+-- ------------------------------------------------------------
+-- 	Métodos de ventana
+-- ------------------------------------------------------------
+function SugarUI:Show()
+	self.Root.Visible = true
+	if self.Bubble then self.Bubble.Visible = false end
+	playOpenAnimation(self.Root, self._targetSize, self._targetPosition)
+end
+
+function SugarUI:Hide()
+	self.Root.Visible = false
+	if self.Bubble then self.Bubble.Visible = true end
+end
+
+function SugarUI:Toggle()
+	if self.Root.Visible then self:Hide() else self:Show() end
+end
+
+function SugarUI:Destroy()
+	if self._connections then
+		for _, conn in ipairs(self._connections) do
+			pcall(function() conn:Disconnect() end)
+		end
+	end
+	if self.ScreenGui then
+		self.ScreenGui:Destroy()
+	end
+	for i, w in ipairs(SugarUI.Windows) do
+		if w == self then
+			table.remove(SugarUI.Windows, i)
+			break
+		end
+	end
+end
+
+-- ============================================================
+-- 	SECCIONES DEL SIDEBAR (GENERAL / ACCIONES / etc.)
+-- ============================================================
+function SugarUI:_getSection(name)
+	if self._sections[name] then
+		return self._sections[name]
+	end
+
+	new("TextLabel", {
+		Text = name,
+		Font = Theme.FontSemibold,
+		TextSize = 11,
+		TextColor3 = Theme.TextFaint,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 18),
+		LayoutOrder = #self._sections * 1000,
+		Parent = self.SidebarList,
+	})
+
+	self._sections[name] = true
+	return true
+end
+
+function SugarUI:CreateDivider()
+	new("Frame", {
+		Size = UDim2.new(1, 0, 0, 1),
+		BackgroundColor3 = Theme.Stroke,
+		LayoutOrder = 900 + (#self._sections * 1000),
+		Parent = self.SidebarList,
+	})
+end
+
+-- ============================================================
+-- 	CREATE TAB
+-- ============================================================
+function SugarUI:CreateTab(config)
+	config = config or {}
+	self:_getSection(config.Section or "GENERAL")
+
+	local isFirst = #self._tabs == 0
+
+	local tabChildren = { corner(22) }
+	if isFirst then
+		table.insert(tabChildren, accentGradient())
+	end
+
+	local TabButton = new("TextButton", {
+		Name = config.Name,
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundColor3 = isFirst and Theme.Accent or Theme.Sidebar,
+		Size = UDim2.new(1, 0, 0, 44),
+		Parent = self.SidebarList,
+	}, tabChildren)
+
+	local iconCircle = new("TextLabel", {
+		Text = config.Icon or "•",
+		Font = Theme.FontBold,
+		TextSize = 13,
+		TextColor3 = Theme.Text,
+		BackgroundColor3 = isFirst and Color3.fromRGB(255,255,255) or Theme.PanelAlt,
+		BackgroundTransparency = isFirst and 0.85 or 0,
+		Size = UDim2.new(0, 26, 0, 26),
+		Position = UDim2.new(0, 9, 0.5, -13),
+		Parent = TabButton,
+	}, { corner(13) })
+	if not isFirst then
+		trackThemeColor(iconCircle, "BackgroundColor3", "PanelAlt")
+	end
+
+	local Indicator = new("Frame", {
+		Name = "Indicator",
+		Size = UDim2.new(0, 3, 0, 20),
+		Position = UDim2.new(0, 2, 0.5, -10),
+		BackgroundColor3 = Theme.Text,
+		BackgroundTransparency = isFirst and 0.15 or 1,
+		Parent = TabButton,
+	}, { corner(2) })
+
+	new("TextLabel", {
+		Text = config.Name or "Tab",
+		Font = Theme.FontSemibold,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -55, 1, 0),
+		Position = UDim2.new(0, 45, 0, 0),
+		Parent = TabButton,
+	})
+
+	if not isFirst then
+		hoverThemeTint(TabButton, "Sidebar", "PanelAlt")
+	end
+
+	local Page = new("Frame", {
+		Name = config.Name .. "Page",
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Visible = isFirst,
+		LayoutOrder = 1,
+		Parent = self.ContentScroll,
+	}, {
+		new("UIListLayout", { Padding = UDim.new(0, 18), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
+
+	new("TextLabel", {
+		Text = config.Name,
+		Font = Theme.FontBold,
+		TextSize = 26,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 32),
+		LayoutOrder = 0,
+		Parent = Page,
+	})
+
+	new("TextLabel", {
+		Text = config.Description or "",
+		Font = Theme.Font,
+		TextSize = 14,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 20),
+		LayoutOrder = 1,
+		Visible = config.Description ~= nil,
+		Parent = Page,
+	})
+
+	local Tab = setmetatable({
+		Window = self,
+		Button = TabButton,
+		Page = Page,
+		Indicator = Indicator,
+		_rowCount = 2,
+	}, SugarUI)
+
+	-- Repinta el fondo de ESTA pestaña con el acento nuevo SOLO si es la
+	-- pestaña activa en este momento (Page.Visible == true). Las pestañas
+	-- apagadas siguen con Theme.Sidebar (color neutro) y no se tocan.
+	-- Esto es lo que faltaba para que la pestaña activa no se quedara con
+	-- el color viejo al cambiar de paleta mientras el panel está abierto.
+	onAccentChanged(function()
+		if TabButton.Parent and Page.Visible then
+			TabButton.BackgroundColor3 = Theme.Accent
+		end
+	end)
+
+	table.insert(self._connections, TabButton.MouseButton1Click:Connect(function()
+		for _, t in ipairs(self._tabs) do
+			t.Page.Visible = false
+			t.Button.BackgroundColor3 = Theme.Sidebar
+			t.Indicator.BackgroundTransparency = 1
+		end
+		Page.Visible = true
+		TabButton.BackgroundColor3 = Theme.Accent
+		Indicator.BackgroundTransparency = 0.15
+		safeCall(nil, Tab.OnSelect)
+	end))
+
+	table.insert(self._tabs, Tab)
+	return Tab
+end
+
+-- ============================================================
+-- 	PERFIL DE USUARIO
+-- ============================================================
+function SugarUI:CreateProfile(config)
+	config = config or {}
+	local Row = self.ProfileRow
+	if not Row then return end
+
+	for _, child in ipairs(Row:GetChildren()) do
+		child:Destroy()
+	end
+
+	local InitialsIcon = new("TextLabel", {
+		Text = config.Initials or "?",
+		Font = Theme.FontBold,
+		TextSize = 13,
+		TextColor3 = Theme.Text,
+		BackgroundColor3 = Theme.Accent,
+		Size = UDim2.new(0, 34, 0, 34),
+		Position = UDim2.new(0, 0, 0.5, -17),
+		Parent = Row,
+	}, { corner(17) })
+	-- El ícono de iniciales también sigue el color de acento actual.
+	trackAccentColor(InitialsIcon, "BackgroundColor3")
+
+	new("TextLabel", {
+		Text = config.Name or "Usuario",
+		Font = Theme.FontSemibold,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -46, 0, 18),
+		Position = UDim2.new(0, 46, 0, 2),
+		Parent = Row,
+	})
+
+	local RoleRow = new("Frame", {
+		Size = UDim2.new(1, -46, 0, 16),
+		Position = UDim2.new(0, 46, 0, 22),
+		BackgroundTransparency = 1,
+		Parent = Row,
+	})
+
+	new("Frame", {
+		Size = UDim2.new(0, 7, 0, 7),
+		Position = UDim2.new(0, 0, 0.5, -3.5),
+		BackgroundColor3 = config.Online ~= false and Theme.Online or Theme.TextFaint,
+		Parent = RoleRow,
+	}, { corner(4) })
+
+	new("TextLabel", {
+		Text = config.Role or "",
+		Font = Theme.Font,
+		TextSize = 12,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -14, 1, 0),
+		Position = UDim2.new(0, 14, 0, 0),
+		Parent = RoleRow,
+	})
+end
+
+-- ============================================================
+-- 	ESTADÍSTICAS
+-- ============================================================
+function SugarUI:CreateStatRow()
+	local Row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 60),
+		BackgroundTransparency = 1,
+		LayoutOrder = self._rowCount,
+		Parent = self.Page,
+	}, {
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			Padding = UDim.new(0, 16),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+	})
+	self._rowCount += 1
+
+	local StatRow = setmetatable({ Window = self.Window, Row = Row, _count = 0 }, SugarUI)
+	return StatRow
+end
+
+function SugarUI:CreateStat(config)
+	config = config or {}
+	local container = self.Row or self.Page
+
+	local Stat = new("Frame", {
+		Size = UDim2.new(0, 108, 1, 0),
+		BackgroundTransparency = 1,
+		LayoutOrder = self._count or 0,
+		Parent = container,
+	})
+
+	local ValueLabel = new("TextLabel", {
+		Text = config.Value or "0",
+		Font = Theme.FontBold,
+		TextSize = 30,
+		TextColor3 = Theme.Accent,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 36),
+		Parent = Stat,
+	})
+	trackAccentColor(ValueLabel, "TextColor3")
+
+	new("TextLabel", {
+		Text = config.Label or "",
+		Font = Theme.Font,
+		TextSize = 13,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextWrapped = true,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 32),
+		Position = UDim2.new(0, 0, 0, 34),
+		Parent = Stat,
+	})
+
+	if self._count ~= nil then
+		self._count += 1
+	end
+
+	local StatController = setmetatable({ ValueLabel = ValueLabel, Value = config.Value or "0" }, SugarUI)
+
+	function StatController:Set(newValue)
+		self.Value = newValue
+		ValueLabel.Text = tostring(newValue)
+	end
+
+	registerFlag(config.Flag, StatController, config.Value)
+	return StatController
+end
+
+function SugarUI:CreateSectionLabel(text)
+	new("TextLabel", {
+		Text = text,
+		Font = Theme.FontSemibold,
+		TextSize = 12,
+		TextColor3 = Theme.TextFaint,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 18),
+		LayoutOrder = self._rowCount,
+		Parent = self.Page,
+	})
+	self._rowCount += 1
+end
+
+-- ============================================================
+-- 	ACCESO RÁPIDO
+-- ============================================================
+function SugarUI:CreateQuickAccess(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+
+	local Card = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 84),
+		BackgroundColor3 = Theme.Panel,
+		BackgroundTransparency = Theme.PanelTransparency,
+		LayoutOrder = self._rowCount,
+		Parent = self.Page,
+	}, { corner(18), stroke(Theme.Stroke, 1), pad(16) })
+	trackThemeColor(Card, "BackgroundColor3", "Panel")
+	self._rowCount += 1
+
+	trackThemeColor(new("TextLabel", {
+		Text = config.Icon or "•",
+		Font = Theme.FontBold,
+		TextSize = 15,
+		TextColor3 = Theme.Text,
+		BackgroundColor3 = Theme.PanelAlt,
+		Size = UDim2.new(0, 34, 0, 34),
+		Parent = Card,
+	}, { corner(17) }), "BackgroundColor3", "PanelAlt")
+
+	new("TextLabel", {
+		Text = config.Title or "Acceso",
+		Font = Theme.FontSemibold,
+		TextSize = 16,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -50, 0, 20),
+		Position = UDim2.new(0, 50, 0, 6),
+		Parent = Card,
+	})
+
+	local ClickOverlay = new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		Parent = Card,
+	})
+
+	local QuickAccess = setmetatable({ Card = Card, Callback = callback, _threads = {} }, SugarUI)
+
+	function QuickAccess:Set(...)
+		safeCall(self, self.Callback, ...)
+	end
+
+	function QuickAccess:Stop()
+		stopThread(self)
+	end
+
+	table.insert(self.Window._connections, ClickOverlay.MouseButton1Click:Connect(function()
+		QuickAccess:Set()
+	end))
+	hoverThemeTint(Card, "Panel", "PanelAlt")
+
+	registerFlag(config.Flag, QuickAccess, nil)
+	return QuickAccess
+end
+
+-- ============================================================
+-- 	BOTÓN
+-- ============================================================
+function SugarUI:CreateButton(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+
+	local Btn = new("TextButton", {
+		Text = config.Text or "Botón",
+		Font = Theme.FontSemibold,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.Accent,
+		Size = UDim2.new(0, 160, 0, 40),
+		LayoutOrder = self._rowCount,
+		Parent = self.Page,
+	}, { corner(20), accentGradient() })
+	self._rowCount += 1
+	trackAccentColor(Btn, "BackgroundColor3")
+
+	hoverAccentTint(Btn)
+	pressFeedback(Btn)
+
+	local Button = setmetatable({ Instance = Btn, Callback = callback, _threads = {} }, SugarUI)
+
+	function Button:Set(...)
+		safeCall(self, self.Callback, ...)
+	end
+
+	function Button:Stop()
+		stopThread(self)
+	end
+
+	table.insert(self.Window._connections, Btn.MouseButton1Click:Connect(function()
+		Button:Set()
+	end))
+
+	registerFlag(config.Flag, Button, nil)
+	return Button
+end
+
+-- ============================================================
+-- 	TOGGLE
+-- ============================================================
+function SugarUI:CreateToggle(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+	local state = config.Default or false
+
+	local Row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 44),
+		BackgroundColor3 = Theme.Panel,
+		BackgroundTransparency = Theme.PanelTransparency,
+		LayoutOrder = self._rowCount,
+		Parent = self.Page,
+	}, { corner(16), stroke(Theme.Stroke, 1), pad(0, 0, 16, 0, 16) })
+	trackThemeColor(Row, "BackgroundColor3", "Panel")
+	self._rowCount += 1
+
+	new("TextLabel", {
+		Text = config.Text or "Opción",
+		Font = Theme.Font,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -60, 1, 0),
+		Parent = Row,
+	})
+
+	local Track = new("Frame", {
+		Size = UDim2.new(0, 42, 0, 22),
+		Position = UDim2.new(1, -42, 0.5, -11),
+		BackgroundColor3 = state and Theme.Accent or Theme.PanelAlt,
+		Parent = Row,
+	}, { corner(11), stroke(Theme.Stroke, 1) })
+
+	local Knob = new("Frame", {
+		Size = UDim2.new(0, 16, 0, 16),
+		Position = state and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8),
+		BackgroundColor3 = Theme.Text,
+		Parent = Track,
+	}, { corner(8) })
+
+	local ClickOverlay = new("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1,0,1,0), Parent = Row })
+
+	local Toggle = setmetatable({ Track = Track, Knob = Knob, Value = state, Callback = callback, _threads = {} }, SugarUI)
+
+	local function paint(newState)
+		TweenService:Create(Track, TweenInfo.new(0.15), { BackgroundColor3 = newState and Theme.Accent or Theme.PanelAlt }):Play()
+		TweenService:Create(Knob, TweenInfo.new(0.15), { Position = newState and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8) }):Play()
+	end
+
+	-- Si este Toggle está ENCENDIDO en este momento, su riel se repinta
+	-- con el acento nuevo. Si está apagado, se queda con el gris neutro
+	-- (Theme.PanelAlt) — esto es lo que faltaba para que un Auto-M1
+	-- prendido no se quedara con el color viejo al cambiar de paleta.
+	onAccentChanged(function()
+		if Track.Parent then
+			TweenService:Create(Track, TweenInfo.new(0.15), {
+				BackgroundColor3 = Toggle.Value and Theme.Accent or Theme.PanelAlt,
+			}):Play()
+		end
+	end)
+
+	function Toggle:Set(newState)
+		newState = not not newState
+		self.Value = newState
+		paint(newState)
+		SugarUI.FlagValues[config.Flag] = newState
+		safeCall(self, self.Callback, newState)
+	end
+
+	function Toggle:Stop()
+		stopThread(self)
+	end
+
+	table.insert(self.Window._connections, ClickOverlay.MouseButton1Click:Connect(function()
+		Toggle:Set(not Toggle.Value)
+	end))
+
+	registerFlag(config.Flag, Toggle, state)
+	return Toggle
+end
+
+-- ============================================================
+-- 	SLIDER
+-- ============================================================
+function SugarUI:CreateSlider(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+	local min = config.Min or 0
+	local max = config.Max or 100
+	local value = math.clamp(config.Default or min, min, max)
+
+	local Row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 56),
+		BackgroundColor3 = Theme.Panel,
+		BackgroundTransparency = Theme.PanelTransparency,
+		LayoutOrder = self._rowCount,
+		Parent = self.Page,
+	}, { corner(16), stroke(Theme.Stroke, 1), pad(0, 10, 16, 10, 16) })
+	trackThemeColor(Row, "BackgroundColor3", "Panel")
+	self._rowCount += 1
+
+	new("TextLabel", {
+		Text = config.Text or "Valor",
+		Font = Theme.Font,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -50, 0, 18),
+		Parent = Row,
+	})
+
+	local ValueLabel = new("TextLabel", {
+		Text = tostring(value),
+		Font = Theme.FontSemibold,
+		TextSize = 13,
+		TextColor3 = Theme.Accent,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 50, 0, 18),
+		Position = UDim2.new(1, -50, 0, 0),
+		Parent = Row,
+	})
+	trackAccentColor(ValueLabel, "TextColor3")
+
+	local Track = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 8),
+		Position = UDim2.new(0, 0, 0, 30),
+		BackgroundColor3 = Theme.PanelAlt,
+		Parent = Row,
+	}, { corner(4) })
+	trackThemeColor(Track, "BackgroundColor3", "PanelAlt")
+
+	local function ratio(v)
+		return (v - min) / math.max(max - min, 1e-6)
+	end
+
+	local Fill = new("Frame", {
+		Size = UDim2.new(ratio(value), 0, 1, 0),
+		BackgroundColor3 = Theme.Accent,
+		Parent = Track,
+	}, { corner(4) })
+	trackAccentColor(Fill, "BackgroundColor3")
+
+	local Knob = new("Frame", {
+		Size = UDim2.new(0, 14, 0, 14),
+		Position = UDim2.new(ratio(value), -7, 0.5, -7),
+		BackgroundColor3 = Theme.Text,
+		Parent = Track,
+	}, { corner(7) })
+
+	local Slider = setmetatable({ Track = Track, Fill = Fill, Knob = Knob, Value = value, Callback = callback, _threads = {} }, SugarUI)
+
+	local function paint(v)
+		local r = ratio(v)
+		Fill.Size = UDim2.new(r, 0, 1, 0)
+		Knob.Position = UDim2.new(r, -7, 0.5, -7)
+		ValueLabel.Text = tostring(v)
+	end
+
+	function Slider:Set(newValue)
+		newValue = math.clamp(math.floor(newValue + 0.5), min, max)
+		self.Value = newValue
+		paint(newValue)
+		SugarUI.FlagValues[config.Flag] = newValue
+		safeCall(self, self.Callback, newValue)
+	end
+
+	function Slider:Stop()
+		stopThread(self)
+	end
+
+	local dragging = false
+	local function setFromX(xPos)
+		local relative = math.clamp((xPos - Track.AbsolutePosition.X) / Track.AbsoluteSize.X, 0, 1)
+		Slider:Set(min + relative * (max - min))
+	end
+
+	local function isMouseOverThisTrack()
+		local ok, mousePos = pcall(function()
+			return UserInputService:GetMouseLocation()
+		end)
+		if not ok then return true end
+		local tPos, tSize = Track.AbsolutePosition, Track.AbsoluteSize
+		return mousePos.Y >= tPos.Y - 20 and mousePos.Y <= tPos.Y + tSize.Y + 20
+	end
+
+	table.insert(self.Window._connections, Track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			setFromX(input.Position.X)
+		end
+	end))
+
+	table.insert(self.Window._connections, UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			if isMouseOverThisTrack() then
+				setFromX(input.Position.X)
+			end
+		end
+	end))
+
+	table.insert(self.Window._connections, UserInputService.InputEnded:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			dragging = false
+		end
+	end))
+
+	registerFlag(config.Flag, Slider, value)
+	return Slider
+end
+
+-- ============================================================
+-- 	DROPDOWN
+-- ============================================================
+function SugarUI:CreateDropdown(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+	local options = config.Options or {}
+	local selected = config.Default or options[1]
+
+	local Row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 44),
+		BackgroundColor3 = Theme.Panel,
+		BackgroundTransparency = Theme.PanelTransparency,
+		LayoutOrder = self._rowCount,
+		ClipsDescendants = false,
+		ZIndex = 2,
+		Parent = self.Page,
+	}, { corner(16), stroke(Theme.Stroke, 1), pad(0, 0, 16, 0, 16) })
+	trackThemeColor(Row, "BackgroundColor3", "Panel")
+	self._rowCount += 1
+
+	new("TextLabel", {
+		Text = config.Text or "Opciones",
+		Font = Theme.Font,
+		TextSize = 13,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0.5, 0, 1, 0),
+		Parent = Row,
+	})
+
+	local SelectedLabel = new("TextLabel", {
+		Text = tostring(selected or "—"),
+		Font = Theme.FontSemibold,
+		TextSize = 14,
+		TextColor3 = Theme.Accent,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0.5, 20, 0, 0),
+		Size = UDim2.new(0.5, -20, 1, 0),
+		Parent = Row,
+	})
+	trackAccentColor(SelectedLabel, "TextColor3")
+
+	local ClickOverlay = new("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = Row })
+
+	local ListFrame = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 0, math.min(#options, 5) * 32 + 8),
+		Position = UDim2.new(0, 0, 1, 6),
+		BackgroundColor3 = Theme.PanelAlt,
+		Visible = false,
+		ZIndex = 5,
+		ScrollBarThickness = 4,
+		ScrollBarImageColor3 = Theme.Accent,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Parent = Row,
+	}, {
+		corner(12), stroke(Theme.Stroke, 1), pad(4),
+		new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
+	trackAccentColor(ListFrame, "ScrollBarImageColor3")
+	trackThemeColor(ListFrame, "BackgroundColor3", "PanelAlt")
+
+	local Dropdown = setmetatable({ Value = selected, Callback = callback, Options = options, _threads = {} }, SugarUI)
+
+	function Dropdown:Set(option)
+		self.Value = option
+		SelectedLabel.Text = tostring(option)
+		SugarUI.FlagValues[config.Flag] = option
+		safeCall(self, self.Callback, option)
+	end
+
+	function Dropdown:Stop()
+		stopThread(self)
+	end
+
+	for _, optionValue in ipairs(options) do
+		local OptionBtn = new("TextButton", {
+			Text = tostring(optionValue),
+			Font = Theme.Font,
+			TextSize = 13,
+			TextColor3 = Theme.Text,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			ClipsDescendants = true,
+			BackgroundColor3 = Theme.Panel,
+			AutoButtonColor = false,
+			Size = UDim2.new(1, 0, 0, 28),
+			Parent = ListFrame,
+		}, { corner(8), pad(0, 0, 8, 0, 8) })
+		trackThemeColor(OptionBtn, "BackgroundColor3", "Panel")
+		hoverThemeTint(OptionBtn, "Panel", "Sidebar")
+
+		table.insert(self.Window._connections, OptionBtn.MouseButton1Click:Connect(function()
+			Dropdown:Set(optionValue)
+			ListFrame.Visible = false
+		end))
+	end
+
+	table.insert(self.Window._connections, ClickOverlay.MouseButton1Click:Connect(function()
+		ListFrame.Visible = not ListFrame.Visible
+	end))
+
+	registerFlag(config.Flag, Dropdown, selected)
+	return Dropdown
+end
+
+-- ============================================================
+-- 	KEYBIND
+-- ============================================================
+function SugarUI:CreateKeybind(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+	local currentKey = config.Default or Enum.KeyCode.RightShift
+	local listening = false
+
+	local Row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 44),
+		BackgroundColor3 = Theme.Panel,
+		BackgroundTransparency = Theme.PanelTransparency,
+		LayoutOrder = self._rowCount,
+		Parent = self.Page,
+	}, { corner(16), stroke(Theme.Stroke, 1), pad(0, 0, 16, 0, 16) })
+	trackThemeColor(Row, "BackgroundColor3", "Panel")
+	self._rowCount += 1
+
+	new("TextLabel", {
+		Text = config.Text or "Tecla",
+		Font = Theme.Font,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -110, 1, 0),
+		Parent = Row,
+	})
+
+	local KeyButton = new("TextButton", {
+		Text = currentKey.Name,
+		Font = Theme.FontSemibold,
+		TextSize = 13,
+		TextColor3 = Theme.Text,
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.PanelAlt,
+		Size = UDim2.new(0, 90, 0, 28),
+		Position = UDim2.new(1, -90, 0.5, -14),
+		Parent = Row,
+	}, { corner(8), stroke(Theme.Stroke, 1) })
+	trackThemeColor(KeyButton, "BackgroundColor3", "PanelAlt")
+
+	local Keybind = setmetatable({ Value = currentKey, Callback = callback, _threads = {} }, SugarUI)
+
+	function Keybind:Set(keyCode)
+		self.Value = keyCode
+		KeyButton.Text = keyCode.Name
+		SugarUI.FlagValues[config.Flag] = keyCode
+	end
+
+	function Keybind:Stop()
+		stopThread(self)
+	end
+
+	table.insert(self.Window._connections, KeyButton.MouseButton1Click:Connect(function()
+		listening = true
+		KeyButton.Text = "..."
+	end))
+
+	table.insert(self.Window._connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if listening and input.UserInputType == Enum.UserInputType.Keyboard then
+			listening = false
+			Keybind:Set(input.KeyCode)
+			return
+		end
+		if not listening and not gameProcessed and input.KeyCode == Keybind.Value then
+			safeCall(Keybind, Keybind.Callback, Keybind.Value)
+		end
+	end))
+
+	registerFlag(config.Flag, Keybind, currentKey)
+	return Keybind
+end
+
+return SugarUI
