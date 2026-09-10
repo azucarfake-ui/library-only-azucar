@@ -1637,7 +1637,7 @@ function SugarUI:CreateQuickAccess(config)
 	}, { corner(17) }), "BackgroundColor3", "PanelAlt")
 
 	new("TextLabel", {
-		Text = config.Title or "Acceso",
+		Text = config.Title or config.Text or config.Name or "Acceso",
 		Font = Theme.FontSemibold,
 		TextSize = 16,
 		TextColor3 = Theme.Text,
@@ -1682,7 +1682,7 @@ function SugarUI:CreateButton(config)
 	local callback = resolveCallback(config)
 
 	local Btn = new("TextButton", {
-		Text = config.Text or "Botón",
+		Text = config.Text or config.Name or "Botón",
 		Font = Theme.FontSemibold,
 		TextSize = 14,
 		TextColor3 = Theme.Text,
@@ -1735,7 +1735,7 @@ function SugarUI:CreateToggle(config)
 	self._rowCount += 1
 
 	new("TextLabel", {
-		Text = config.Text or "Opción",
+		Text = config.Text or config.Name or "Opción",
 		Font = Theme.Font,
 		TextSize = 14,
 		TextColor3 = Theme.Text,
@@ -1821,7 +1821,7 @@ function SugarUI:CreateSlider(config)
 	self._rowCount += 1
 
 	new("TextLabel", {
-		Text = config.Text or "Valor",
+		Text = config.Text or config.Name or "Valor",
 		Font = Theme.Font,
 		TextSize = 14,
 		TextColor3 = Theme.Text,
@@ -1969,7 +1969,7 @@ function SugarUI:CreateDropdown(config)
 	self._rowCount += 1
 
 	new("TextLabel", {
-		Text = config.Text or "Opciones",
+		Text = config.Text or config.Name or "Opciones",
 		Font = Theme.Font,
 		TextSize = 13,
 		TextColor3 = Theme.TextDim,
@@ -2076,7 +2076,7 @@ function SugarUI:CreateKeybind(config)
 	self._rowCount += 1
 
 	new("TextLabel", {
-		Text = config.Text or "Tecla",
+		Text = config.Text or config.Name or "Tecla",
 		Font = Theme.Font,
 		TextSize = 14,
 		TextColor3 = Theme.Text,
