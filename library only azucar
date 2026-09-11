@@ -1705,13 +1705,19 @@ function SugarUI:CreateButton(config)
 		Text = config.Text or config.Name or "Botón",
 		Font = Theme.FontSemibold,
 		TextSize = 14,
-		TextColor3 = Theme.Text,
+		TextColor3 = Color3.fromRGB(255, 255, 255),
 		AutoButtonColor = false,
 		BackgroundColor3 = Theme.Accent,
-		Size = UDim2.new(0, 160, 0, 40),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 0, 40),
 		LayoutOrder = self._rowCount,
 		Parent = self.Page,
-	}, { corner(20), accentGradient() })
+	}, {
+		corner(20),
+		accentGradient(),
+		pad(0, 0, 20, 0, 20),
+		new("UISizeConstraint", { MinSize = Vector2.new(160, 0) }),
+	})
 	self._rowCount += 1
 	trackAccentColor(Btn, "BackgroundColor3")
 
