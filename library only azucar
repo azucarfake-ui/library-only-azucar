@@ -1832,9 +1832,27 @@ end
 function SugarUI:CreateSlider(config)
 	config = config or {}
 	local callback = resolveCallback(config)
-	local min = config.Min or 0
-	local max = config.Max or 100
-	local value = math.clamp(config.Default or min, min, max)
+
+	-- Acepta Min/Max, o Range = {min, max} como alternativa.
+	local rangeMin, rangeMax = config.Min, config.Max
+	if typeof(config.Range) == "table" then
+		rangeMin = rangeMin or config.Range[1]
+		rangeMax = rangeMax or config.Range[2]
+	end
+	local min = rangeMin or 0
+	local max = rangeMax or 100
+
+	-- Incremento: de cuánto en cuánto salta el slider (por defecto 1).
+	local step = config.Increment or config.Step or 1
+	if step <= 0 then step = 1 end
+
+	local function snap(v)
+		v = math.clamp(v, min, max)
+		return min + math.floor((v - min) / step + 0.5) * step
+	end
+
+	-- Acepta Default, o CurrentValue como alternativa.
+	local value = snap(config.Default or config.CurrentValue or min)
 
 	local Row = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 56),
@@ -1906,7 +1924,7 @@ function SugarUI:CreateSlider(config)
 	end
 
 	function Slider:Set(newValue)
-		newValue = math.clamp(math.floor(newValue + 0.5), min, max)
+		newValue = snap(newValue)
 		self.Value = newValue
 		paint(newValue)
 		SugarUI.FlagValues[config.Flag] = newValue
