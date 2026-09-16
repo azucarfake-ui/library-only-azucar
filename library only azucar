@@ -445,6 +445,11 @@ function UI:CreateWindow(config)
 	-- Más arriba: antes arrancaba en 8px por debajo del borde del área
 	-- útil. Ahora queda pegada al tope.
 	local TOP_Y    = config.TopOffset or 0
+	-- Único margen que queda: un colchón chico abajo para que el panel
+	-- no se pase del borde de la pantalla. Todo lo demás (cabecera-riel,
+	-- riel-panel, panel-grupo) va a 0: sin separación, para que no se
+	-- vea nada del fondo del juego colándose entre los bloques.
+	local BOTTOM_MARGIN = config.BottomMargin or 6
 
 	local ScreenGui = new("ScreenGui", {
 		Name = "AzucarHackerUI",
@@ -476,7 +481,7 @@ function UI:CreateWindow(config)
 	-- ---------------- Cabecera con el NOMBRE ----------------
 	local Header = new("Frame", {
 		Name = "Header",
-		Size = UDim2.new(0, RAIL_W + PANEL_W + 4, 0, HEADER_H),
+		Size = UDim2.new(0, RAIL_W + PANEL_W, 0, HEADER_H),
 		Position = UDim2.new(0, 0, 0, TOP_Y),
 		BackgroundColor3 = Theme.Header,
 		BorderSizePixel = 0,
@@ -553,8 +558,8 @@ function UI:CreateWindow(config)
 	-- ---------------- Riel de pestañas ----------------
 	local Rail = new("Frame", {
 		Name = "Rail",
-		Size = UDim2.new(0, RAIL_W, 1, -(TOP_Y + HEADER_H + 14)),
-		Position = UDim2.new(0, 0, 0, TOP_Y + HEADER_H + 4),
+		Size = UDim2.new(0, RAIL_W, 1, -(TOP_Y + HEADER_H + BOTTOM_MARGIN)),
+		Position = UDim2.new(0, 0, 0, TOP_Y + HEADER_H),
 		BackgroundColor3 = Theme.Rail,
 		BorderSizePixel = 0,
 		Parent = Root,
@@ -589,7 +594,7 @@ function UI:CreateWindow(config)
 		BackgroundColor3 = Theme.Panel,
 		BorderSizePixel = 0,
 		Size = UDim2.new(0, PANEL_W, 0, 90),
-		Position = UDim2.new(0, RAIL_W, 0, TOP_Y + HEADER_H + 4),
+		Position = UDim2.new(0, RAIL_W, 0, TOP_Y + HEADER_H),
 		Parent = Root,
 	}, { stroke(Theme.Border, 1), pad(10) })
 
@@ -622,6 +627,7 @@ function UI:CreateWindow(config)
 		PANEL_W     = PANEL_W,
 		HEADER_H    = HEADER_H,
 		TOP_Y       = TOP_Y,
+		BOTTOM_MARGIN = BOTTOM_MARGIN,
 		_tabs        = {},
 		_connections = {},
 		_visible     = true,
@@ -660,19 +666,19 @@ function UI:MoveTo(offsetX, offsetY)
 	self._originX = offsetX
 
 	self.Header.Position = UDim2.new(0, offsetX, 0, offsetY)
-	self.Rail.Position   = UDim2.new(0, offsetX, 0, offsetY + self.HEADER_H + 4)
-	self.Rail.Size       = UDim2.new(0, self.RAIL_W, 1, -(offsetY + self.HEADER_H + 14))
+	self.Rail.Position   = UDim2.new(0, offsetX, 0, offsetY + self.HEADER_H)
+	self.Rail.Size       = UDim2.new(0, self.RAIL_W, 1, -(offsetY + self.HEADER_H + self.BOTTOM_MARGIN))
 
 	if self.EmptyHint then
-		self.EmptyHint.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H + 4)
+		self.EmptyHint.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
 	end
 
 	for _, tab in ipairs(self._tabs) do
-		tab.Panel.Position = UDim2.new(0, offsetX + self.RAIL_W + 4, 0, offsetY + self.HEADER_H + 4)
-		tab.Panel.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 14))
+		tab.Panel.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
+		tab.Panel.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + self.BOTTOM_MARGIN))
 		for _, group in pairs(tab._groupPanels) do
-			group.Instance.Position = UDim2.new(0, offsetX + self.RAIL_W + self.PANEL_W + 8, 0, offsetY + self.HEADER_H + 4)
-			group.Instance.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 14))
+			group.Instance.Position = UDim2.new(0, offsetX + self.RAIL_W + self.PANEL_W, 0, offsetY + self.HEADER_H)
+			group.Instance.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + self.BOTTOM_MARGIN))
 		end
 	end
 end
@@ -879,8 +885,8 @@ function UI:CreateTab(config)
 	-- Panel de la pestaña
 	local Panel = new("Frame", {
 		Name = name .. "Panel",
-		Size = UDim2.new(0, self.PANEL_W, 1, -(self.TOP_Y + self.HEADER_H + 14)),
-		Position = UDim2.new(0, originX + self.RAIL_W + 4, 0, self.TOP_Y + self.HEADER_H + 4),
+		Size = UDim2.new(0, self.PANEL_W, 1, -(self.TOP_Y + self.HEADER_H + self.BOTTOM_MARGIN)),
+		Position = UDim2.new(0, originX + self.RAIL_W, 0, self.TOP_Y + self.HEADER_H),
 		BackgroundColor3 = Theme.Panel,
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
@@ -1029,8 +1035,8 @@ function UI:CreateGroup(config)
 
 	local GroupPanel = new("Frame", {
 		Name = name .. "GroupPanel",
-		Size = UDim2.new(0, window.PANEL_W, 1, -(window.TOP_Y + window.HEADER_H + 14)),
-		Position = UDim2.new(0, originX + window.RAIL_W + window.PANEL_W + 8, 0, window.TOP_Y + window.HEADER_H + 4),
+		Size = UDim2.new(0, window.PANEL_W, 1, -(window.TOP_Y + window.HEADER_H + window.BOTTOM_MARGIN)),
+		Position = UDim2.new(0, originX + window.RAIL_W + window.PANEL_W, 0, window.TOP_Y + window.HEADER_H),
 		BackgroundColor3 = Theme.Panel,
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
