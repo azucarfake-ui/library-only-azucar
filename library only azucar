@@ -155,6 +155,9 @@ local Theme = {
 	ActiveDim = Color3.fromRGB(152, 32, 32),
 	Font      = Enum.Font.Code,
 	FontBold  = Enum.Font.Code,
+	-- 0 = esquinas rectas en toda la UI. Subilo si alguna vez las querés
+	-- redondeadas otra vez.
+	CornerRadius = 0,
 }
 UI.Theme = Theme
 
@@ -192,8 +195,17 @@ local function new(class, props, children)
 	return inst
 end
 
+-- Bordes CUADRADOS en toda la interfaz. Se controla desde acá: dejando
+-- Theme.CornerRadius en 0, todas las esquinas quedan rectas sin tener
+-- que tocar una por una las decenas de llamadas a corner() que hay
+-- repartidas por el archivo. Si algún día querés volver a redondear,
+-- cambiás ese único número.
 local function corner(radius)
-	return new("UICorner", { CornerRadius = UDim.new(0, radius or 4) })
+	local r = Theme.CornerRadius or 0
+	if r <= 0 then
+		return new("UICorner", { CornerRadius = UDim.new(0, 0) })
+	end
+	return new("UICorner", { CornerRadius = UDim.new(0, radius or r) })
 end
 
 local function stroke(color, thickness)
@@ -345,6 +357,17 @@ local function registerFlag(flagName, controller, initialValue)
 	UI.FlagValues[flagName] = initialValue
 end
 
+-- Guardar el valor de una flag SIN reventar cuando el control no tiene
+-- Flag. En Lua, "tabla[nil] = valor" lanza "table index is nil" y mata
+-- el hilo ahí mismo: cualquier Toggle/Slider/Dropdown creado sin Flag
+-- (o sea, la mayoría) se rompía apenas lo tocabas.
+local function setFlagValue(flagName, value)
+	if flagName == nil then
+		return
+	end
+	UI.FlagValues[flagName] = value
+end
+
 -- Devuelve el contenedor donde va la fila y la ventana dueña, sin
 -- importar si el método se llamó sobre un Tab, sobre un Grupo, o por
 -- error sobre la propia ventana.
@@ -419,7 +442,9 @@ function UI:CreateWindow(config)
 	local RAIL_W   = config.RailWidth or 148
 	local PANEL_W  = config.PanelWidth or 275
 	local HEADER_H = 32
-	local TOP_Y    = config.TopOffset or 8
+	-- Más arriba: antes arrancaba en 8px por debajo del borde del área
+	-- útil. Ahora queda pegada al tope.
+	local TOP_Y    = config.TopOffset or 0
 
 	local ScreenGui = new("ScreenGui", {
 		Name = "AzucarHackerUI",
@@ -482,7 +507,7 @@ function UI:CreateWindow(config)
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 18, 0, 0),
-		Size = UDim2.new(1, -90, 1, 0),
+		Size = UDim2.new(1, -112, 1, 0),
 		Parent = Header,
 	})
 
@@ -498,38 +523,32 @@ function UI:CreateWindow(config)
 			TextTruncate = Enum.TextTruncate.AtEnd,
 			BackgroundTransparency = 1,
 			Position = UDim2.new(0, 18 + TitleLabel.Size.X.Offset + 6, 0, 0),
-			Size = UDim2.new(1, -(TitleLabel.Size.X.Offset + 112), 1, 0),
+			Size = UDim2.new(1, -(TitleLabel.Size.X.Offset + 134), 1, 0),
 			Parent = Header,
 		})
 	end
 
-	local HideBtn = new("TextButton", {
-		Name = "HideBtn",
-		Text = "—",
-		Font = Theme.FontBold,
-		TextSize = 13,
-		TextColor3 = Theme.TextDim,
-		AutoButtonColor = false,
-		BackgroundColor3 = Theme.PanelAlt,
-		BorderSizePixel = 0,
-		Size = UDim2.new(0, 24, 0, 20),
-		Position = UDim2.new(1, -56, 0.5, -10),
-		Parent = Header,
-	}, { corner(3), stroke(Theme.Border, 1) })
-
-	local CloseBtn = new("TextButton", {
-		Name = "CloseBtn",
-		Text = "X",
+	-- En vez de los botones "—" y "X" va el sello de la librería.
+	-- Para abrir/cerrar el panel se usa la tecla K (o config.ToggleKey).
+	local BrandLabel = new("TextLabel", {
+		Name = "Brand",
+		Text = "Azucar UI",
 		Font = Theme.FontBold,
 		TextSize = 12,
-		TextColor3 = Theme.TextDim,
-		AutoButtonColor = false,
-		BackgroundColor3 = Theme.PanelAlt,
-		BorderSizePixel = 0,
-		Size = UDim2.new(0, 24, 0, 20),
-		Position = UDim2.new(1, -28, 0.5, -10),
+		TextColor3 = Theme.Active,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -10, 0.5, 0),
+		Size = UDim2.new(0, 90, 1, 0),
 		Parent = Header,
-	}, { corner(3), stroke(Theme.Border, 1) })
+	})
+	onAccent(function()
+		if BrandLabel.Parent then
+			BrandLabel.TextColor3 = Theme.Active
+		end
+	end)
 
 	-- ---------------- Riel de pestañas ----------------
 	local Rail = new("Frame", {
@@ -612,18 +631,6 @@ function UI:CreateWindow(config)
 		table.insert(Window._connections, conn)
 		return conn
 	end
-
-	track(HideBtn.MouseButton1Click:Connect(function()
-		Window:Hide()
-	end))
-	track(CloseBtn.MouseButton1Click:Connect(function()
-		Window:Hide()
-	end))
-
-	HideBtn.MouseEnter:Connect(function() tween(HideBtn, { BackgroundColor3 = Theme.Border }) end)
-	HideBtn.MouseLeave:Connect(function() tween(HideBtn, { BackgroundColor3 = Theme.PanelAlt }) end)
-	CloseBtn.MouseEnter:Connect(function() tween(CloseBtn, { BackgroundColor3 = Theme.Active }) end)
-	CloseBtn.MouseLeave:Connect(function() tween(CloseBtn, { BackgroundColor3 = Theme.PanelAlt }) end)
 
 	-- ---------------- Ventana FIJA ----------------
 	-- Antes la cabecera se podía arrastrar con el mouse. Se sacó a
@@ -1336,7 +1343,7 @@ function UI:CreateToggle(config)
 		newState = not not newState
 		self.Value = newState
 		tween(Box, { BackgroundColor3 = newState and Theme.Active or Theme.PanelAlt })
-		UI.FlagValues[config.Flag] = newState
+		setFlagValue(config.Flag, newState)
 		return safeCall(self, self.Callback, newState)
 	end
 
@@ -1487,7 +1494,7 @@ function UI:CreateSlider(config)
 		newValue = snap(tonumber(newValue) or min)
 		self.Value = newValue
 		repaint(newValue)
-		UI.FlagValues[config.Flag] = newValue
+		setFlagValue(config.Flag, newValue)
 		return safeCall(self, self.Callback, newValue)
 	end
 
@@ -1670,7 +1677,7 @@ function UI:CreateDropdown(config)
 	function Dropdown:Set(option)
 		self.Value = option
 		SelectedLabel.Text = display(option)
-		UI.FlagValues[config.Flag] = option
+		setFlagValue(config.Flag, option)
 		return safeCall(self, self.Callback, option)
 	end
 
@@ -1681,6 +1688,10 @@ function UI:CreateDropdown(config)
 	function Dropdown:Stop()
 		stopAllThreads(self)
 	end
+
+	-- Declarada acá arriba para que el clic de cada opción pueda cerrar
+	-- el acordeón (se define más abajo, cuando ya existe todo lo que usa).
+	local setOpen
 
 	local function buildOptions()
 		for _, child in ipairs(ListFrame:GetChildren()) do
@@ -1729,7 +1740,15 @@ function UI:CreateDropdown(config)
 
 			table.insert(window._connections, OptionBtn.MouseButton1Click:Connect(function()
 				Dropdown:Set(optionValue)
-				ListFrame.Visible = false
+				-- Cerrar el acordeón COMPLETO. Antes solo se ocultaba la
+				-- lista, pero la fila quedaba estirada y dejaba un hueco
+				-- vacío enorme en el panel. Esto pasaba siempre, pero se
+				-- notaba sobre todo en las listas de jugadores.
+				if setOpen then
+					setOpen(false)
+				else
+					ListFrame.Visible = false
+				end
 			end))
 		end
 	end
@@ -1756,7 +1775,7 @@ function UI:CreateDropdown(config)
 	Click.ZIndex = 3
 	Click.Size = UDim2.new(1, 0, 0, ROW_H)
 
-	local function setOpen(open)
+	function setOpen(open)
 		ListFrame.Visible = open
 		local h = listHeight()
 		ListFrame.Size = UDim2.new(1, 20, 0, h)
@@ -1817,7 +1836,7 @@ function UI:CreateInput(config)
 	function Input:Set(text)
 		self.Value = tostring(text)
 		Box.Text = self.Value
-		UI.FlagValues[config.Flag] = self.Value
+		setFlagValue(config.Flag, self.Value)
 		return safeCall(self, self.Callback, self.Value)
 	end
 
@@ -1832,7 +1851,7 @@ function UI:CreateInput(config)
 	table.insert(window._connections, Box.FocusLost:Connect(function(enterPressed)
 		if enterPressed or config.FireOnLoseFocus then
 			Input.Value = Box.Text
-			UI.FlagValues[config.Flag] = Box.Text
+			setFlagValue(config.Flag, Box.Text)
 			safeCall(Input, Input.Callback, Box.Text)
 		end
 	end))
@@ -1886,7 +1905,7 @@ function UI:CreateKeybind(config)
 		end
 		self.Value = keyCode
 		KeyButton.Text = keyCode.Name
-		UI.FlagValues[config.Flag] = keyCode
+		setFlagValue(config.Flag, keyCode)
 	end
 
 	function Keybind:Get()
