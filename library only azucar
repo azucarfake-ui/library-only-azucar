@@ -449,7 +449,7 @@ function UI:CreateWindow(config)
 	-- no se pase del borde de la pantalla. Todo lo demás (cabecera-riel,
 	-- riel-panel, panel-grupo) va a 0: sin separación, para que no se
 	-- vea nada del fondo del juego colándose entre los bloques.
-	local BOTTOM_MARGIN = config.BottomMargin or 6
+	local BOTTOM_MARGIN = config.BottomMargin or 2
 
 	local ScreenGui = new("ScreenGui", {
 		Name = "AzucarHackerUI",
