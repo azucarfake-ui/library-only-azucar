@@ -1,95 +1,185 @@
 --[[
-	AzucarHackerUI
-	--------------
-	Piel nueva, estética oscura/seria tipo panel de exploit: un riel
-	angosto de pestañas a la izquierda de la pantalla; cada pestaña abre
-	una columna con sus filas (toggles, sliders, botones, dropdowns); las
-	filas de tipo "Grupo" tienen una flechita que despliega OTRA columna
-	al lado, con su propio contenido — igual que en la referencia que
-	mandaste. Los controles activos se pintan en rojo. Todo se
-	abre/cierra con la tecla K, como siempre.
+	AzucarHackerUI  v2.0.0
+	======================
+	Panel estilo exploit: riel angosto de pestañas a la izquierda, cada
+	pestaña abre su columna de filas, y las filas de tipo "Grupo" abren
+	OTRA columna al lado. Todo oscuro, acento rojo cuando algo está
+	activo, tipografía monoespaciada.
 
-	EL MOTOR ES EL MISMO QUE SugarUI (Azúcar Hub): mismo sistema de
-	Callbacks corriendo en hilos independientes (task.spawn + pcall,
-	concurrencia ilimitada), mismos Flags/FlagValues, misma limpieza de
-	conexiones, y los mismos alias de nombres de campo que ya veníamos
-	usando:
-		- Text  o  Name          (texto de la fila)
-		- Min/Max  o  Range = {min, max}
-		- Default  o  CurrentValue
-		- Increment  o  Step
-		- Callback  o  Logic = TuTabla (con :Toggle/:Enable+Disable/:Set/:Run)
+	MOTOR IDÉNTICO AL DE SugarUI: mismos Callbacks en hilos independientes
+	(task.spawn + pcall, concurrencia ilimitada), mismos Flags/FlagValues,
+	misma limpieza de conexiones, mismos alias de campos:
+		Text | Name                  → texto de la fila
+		Min/Max | Range = {min, max} → rango del slider
+		Default | CurrentValue       → valor inicial
+		Increment | Step             → salto del slider
+		Callback | Logic = TuTabla   → lógica a ejecutar
 
-	Esto significa que tu script de lógica (los 4500 líneas) NO necesita
-	reescribirse — solo tenés que apuntar el require/loadstring a este
-	archivo en vez de a SugarUI. Las llamadas a CreateToggle, CreateSlider,
-	CreateButton, CreateDropdown, CreateKeybind funcionan igual.
+	POR QUÉ ANTES NO SE VEÍA NADA (arreglado acá):
 
-	Lo nuevo de acá es CreateTab (ahora vive en el riel izquierdo) y
-	CreateGroup (la fila con flechita que despliega la columna lateral).
+	1. Todo quedaba TAPADO por la barra superior de Roblox.
+	   El ScreenGui usaba IgnoreGuiInset = true y el panel arrancaba en
+	   y = 0, así que el título de la pestaña y los primeros botones del
+	   riel quedaban debajo de la barra de Roblox (chat, menú, etc.).
+	   Ahora hay un margen superior real y el inset se respeta.
+
+	2. La ventana NO tenía título en ningún lado.
+	   No existía ningún elemento que mostrara config.Title — por eso
+	   "ni el mismo nombre" aparecía. Ahora hay una cabecera propia.
+
+	3. Faltaban la MITAD de los componentes.
+	   No existían CreateSection, CreateLabel, CreateParagraph,
+	   CreateInput, CreateDivider, CreateStat, CreateProfile, Notify...
+	   Si tu script de lógica llamaba a cualquiera de esos, Lua cortaba
+	   la ejecución ahí mismo con "attempt to call a nil value" y la UI
+	   se quedaba vacía para siempre — exactamente el síntoma que viste:
+	   un panel abierto, sin toggles, sin sliders, sin nada.
+
+	4. RED DE SEGURIDAD nueva: si aun así llamás a un método Create...
+	   que no existe, la librería ya NO rompe el script. Avisa por
+	   consola con warn() y devuelve un objeto inofensivo, así el resto
+	   de tus 4500 líneas se sigue construyendo igual.
 
 	Uso básico:
 
-		local UI = require(script.AzucarHackerUI)
+		local UI = loadstring(game:HttpGet("...AzucarHackerUI.lua"))()
 
-		local Window = UI:CreateWindow({ Title = "Azúcar Hub" })
+		local Window = UI:CreateWindow({ Title = "Azúcar Hub", Subtitle = "v1" })
 
 		local Combate = Window:CreateTab({ Name = "Combate", Icon = "C" })
+
+		Combate:CreateSection("Farmeo")
 
 		Combate:CreateToggle({
 			Text = "Auto Farm",
 			Flag = "AutoFarm",
-			Callback = function(state) ... end,
+			Callback = function(state)
+				while state and UI.FlagValues["AutoFarm"] do
+					task.wait(0.1)
+				end
+			end,
 		})
 
-		local Ajustes = Combate:CreateGroup({ Name = "Ajustes avanzados" })
-		Ajustes:CreateSlider({ Text = "Velocidad", Range = {0, 200}, Default = 16, Callback = function(v) ... end })
+		local Avanzado = Combate:CreateGroup({ Name = "Ajustes avanzados" })
+		Avanzado:CreateSlider({ Text = "Velocidad", Range = {0, 200}, Default = 16,
+			Callback = function(v) print(v) end })
+
+		UI:SetAccentColor("Azul")   -- "Rojo" | "Azul" | "Verde" | "Blanco"
 ]]
 
-local TweenService = game:GetService("TweenService")
-local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Players          = game:GetService("Players")
+local UserInputService  = game:GetService("UserInputService")
 
-local HackerUI = {}
-HackerUI.__index = HackerUI
+local UI = {}
 
-HackerUI.Version    = "1.0.0"
-HackerUI.Windows    = {}
-HackerUI.Flags      = {}
-HackerUI.FlagValues = {}
+UI.Version    = "2.0.0"
+UI.Windows    = {}
+UI.Flags      = {}
+UI.FlagValues = {}
 
-local function getGuiParent()
-	local ok, coreGui = pcall(function() return game:GetService("CoreGui") end)
-	if ok and coreGui then
-		local getHui = rawget(_G, "gethui")
-		if typeof(getHui) == "function" then
-			local success, hui = pcall(getHui)
-			if success and hui then return hui end
+-- ============================================================
+-- 	RED DE SEGURIDAD: un Create... inexistente no mata el script
+-- ============================================================
+-- Objeto tonto: responde a CUALQUIER método devolviendo otro objeto
+-- tonto. Sirve para que una cadena como
+--    Tab:CreateLoQueSea({...}):Set(true)
+-- no explote aunque "CreateLoQueSea" no exista en esta librería.
+local Stub = {}
+Stub.__index = function()
+	return function()
+		return setmetatable({}, Stub)
+	end
+end
+
+local function classIndex(_, key)
+	local found = rawget(UI, key)
+	if found ~= nil then
+		return found
+	end
+	if type(key) == "string" and key:sub(1, 6) == "Create" then
+		warn("[AzucarHackerUI] El método '" .. key .. "' no existe en esta librería. "
+			.. "Se ignoró esa línea para no cortar el resto del script.")
+		return function()
+			return setmetatable({}, Stub)
 		end
 	end
+	return nil
+end
+
+UI.__index = classIndex
+
+-- ============================================================
+-- 	DÓNDE COLGAR LA INTERFAZ
+-- ============================================================
+local function getGuiParent()
+	local getHui = rawget(_G, "gethui")
+	if typeof(getHui) == "function" then
+		local ok, hui = pcall(getHui)
+		if ok and hui then
+			return hui
+		end
+	end
+
+	local okCore, coreGui = pcall(function()
+		return game:GetService("CoreGui")
+	end)
+	if okCore and coreGui then
+		local okTest = pcall(function()
+			local probe = Instance.new("Folder")
+			probe.Parent = coreGui
+			probe:Destroy()
+		end)
+		if okTest then
+			return coreGui
+		end
+	end
+
 	local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 	return player:WaitForChild("PlayerGui")
 end
 
 -- ============================================================
--- 	TEMA: oscuro/serio, acento rojo cuando algo está activo
+-- 	TEMA
 -- ============================================================
 local Theme = {
-	Rail      = Color3.fromRGB(10, 10, 12),
-	Panel     = Color3.fromRGB(18, 18, 21),
-	PanelAlt  = Color3.fromRGB(26, 26, 30),
-	Border    = Color3.fromRGB(42, 42, 47),
-	Text      = Color3.fromRGB(232, 232, 235),
-	TextDim   = Color3.fromRGB(140, 140, 148),
+	Rail      = Color3.fromRGB(12, 12, 14),
+	Header    = Color3.fromRGB(16, 16, 19),
+	Panel     = Color3.fromRGB(19, 19, 22),
+	PanelAlt  = Color3.fromRGB(30, 30, 35),
+	Row       = Color3.fromRGB(23, 23, 27),
+	Border    = Color3.fromRGB(48, 48, 54),
+	Text      = Color3.fromRGB(234, 234, 238),
+	TextDim   = Color3.fromRGB(146, 146, 154),
 	Active    = Color3.fromRGB(224, 48, 48),
-	ActiveDim = Color3.fromRGB(165, 32, 32),
+	ActiveDim = Color3.fromRGB(150, 30, 30),
 	Font      = Enum.Font.Code,
 	FontBold  = Enum.Font.Code,
 }
-HackerUI.Theme = Theme
+UI.Theme = Theme
+
+local Palettes = {
+	Rojo   = { Active = Color3.fromRGB(224, 48, 48),  ActiveDim = Color3.fromRGB(150, 30, 30) },
+	Azul   = { Active = Color3.fromRGB(48, 132, 232), ActiveDim = Color3.fromRGB(28, 84, 160) },
+	Verde  = { Active = Color3.fromRGB(52, 199, 105), ActiveDim = Color3.fromRGB(30, 132, 70) },
+	Blanco = { Active = Color3.fromRGB(226, 226, 232), ActiveDim = Color3.fromRGB(150, 150, 158) },
+}
+UI.Palettes = Palettes
+UI.CurrentPalette = "Rojo"
+
+-- Todo lo que se pinta con el color de acento se anota acá con la
+-- función exacta que necesita para repintarse. SetAccentColor recorre la
+-- lista con un pcall por entrada: si un elemento ya fue destruido, el
+-- resto de la interfaz igual se repinta entera.
+local accentListeners = {}
+
+local function onAccent(fn)
+	table.insert(accentListeners, fn)
+	return fn
+end
 
 -- ============================================================
--- 	HELPERS
+-- 	HELPERS DE CONSTRUCCIÓN
 -- ============================================================
 local function new(class, props, children)
 	local inst = Instance.new(class)
@@ -119,67 +209,128 @@ local function pad(all, top, right, bottom, left)
 	})
 end
 
-local function hoverTint(obj, base, hover)
+local function tween(inst, props, time)
+	TweenService:Create(inst, TweenInfo.new(time or 0.12), props):Play()
+	return inst
+end
+
+-- Hover que lee el color EN EL MOMENTO del evento (no el que tenía
+-- cuando se creó el elemento), así nunca se queda pegado con el acento
+-- viejo después de un cambio de paleta.
+local function hoverRow(obj)
 	obj.MouseEnter:Connect(function()
-		TweenService:Create(obj, TweenInfo.new(0.1), { BackgroundColor3 = hover }):Play()
+		tween(obj, { BackgroundColor3 = Theme.PanelAlt })
 	end)
 	obj.MouseLeave:Connect(function()
-		TweenService:Create(obj, TweenInfo.new(0.1), { BackgroundColor3 = base }):Play()
+		tween(obj, { BackgroundColor3 = Theme.Row })
 	end)
 end
 
+local function hoverAccent(obj)
+	obj.MouseEnter:Connect(function()
+		tween(obj, { BackgroundColor3 = Theme.ActiveDim })
+	end)
+	obj.MouseLeave:Connect(function()
+		tween(obj, { BackgroundColor3 = Theme.Active })
+	end)
+end
+
+function UI:SetAccentColor(paletteName)
+	local palette = Palettes[paletteName]
+	if not palette then
+		warn("[AzucarHackerUI] Paleta desconocida: " .. tostring(paletteName))
+		return
+	end
+	UI.CurrentPalette = paletteName
+	Theme.Active    = palette.Active
+	Theme.ActiveDim = palette.ActiveDim
+	for _, listener in ipairs(accentListeners) do
+		pcall(listener)
+	end
+end
+
 -- ============================================================
--- 	NÚCLEO (idéntico en espíritu al de SugarUI): callbacks en hilos
--- 	independientes, concurrencia ilimitada, nunca congela nada.
+-- 	NÚCLEO: CALLBACKS EN HILOS INDEPENDIENTES (SIN LÍMITE)
 -- ============================================================
+-- Cada disparo de un callback vive en su propio hilo y se anota en el
+-- CONJUNTO controller._threads. Podés disparar el mismo control muchas
+-- veces seguidas, o varios controles a la vez: ninguna lógica pisa a
+-- otra, ninguna congela la interfaz, y :Stop() las corta TODAS.
 local function safeCall(controller, fn, ...)
 	fn = fn or function() end
-	if typeof(fn) ~= "function" then return nil end
+	if typeof(fn) ~= "function" then
+		return nil
+	end
 
 	local args = table.pack(...)
+
 	if controller then
 		controller._threads = controller._threads or {}
 	end
 
-	local thread = task.spawn(function()
-		local selfThread = coroutine.running()
-		if controller then controller._threads[selfThread] = true end
+	return task.spawn(function()
+		local thisThread = coroutine.running()
+		if controller then
+			controller._threads[thisThread] = true
+		end
 
 		local ok, err = pcall(function()
 			fn(table.unpack(args, 1, args.n))
 		end)
 		if not ok then
-			warn("[AzucarHackerUI] Error en callback conectado por el usuario: " .. tostring(err))
+			warn("[AzucarHackerUI] Error en tu callback: " .. tostring(err))
 		end
 
 		if controller and controller._threads then
-			controller._threads[selfThread] = nil
+			controller._threads[thisThread] = nil
 		end
 	end)
-	return thread
 end
 
--- Adaptador de lógica: acepta Callback = function(...) igual que antes, o
--- Logic = TuTabla con :Toggle/:Enable+Disable/:Set/:Run, o una función
--- suelta.
+local function stopAllThreads(controller)
+	if not controller._threads then
+		return
+	end
+	for th in pairs(controller._threads) do
+		pcall(task.cancel, th)
+	end
+	controller._threads = {}
+end
+
+-- Acepta Callback = function(...), o Logic = tabla con
+-- :Enable/:Disable/:Toggle/:Set/:Run, o una función suelta.
 local function resolveCallback(config)
 	if typeof(config.Callback) == "function" then
 		return config.Callback
 	end
+
 	local logic = config.Logic
-	if logic == nil then return function() end end
-	if typeof(logic) == "function" then return logic end
+	if logic == nil then
+		return function() end
+	end
+	if typeof(logic) == "function" then
+		return logic
+	end
 	if typeof(logic) == "table" then
 		return function(value)
 			if typeof(value) == "boolean" then
-				if value and typeof(logic.Enable) == "function" then logic.Enable() return end
-				if not value and typeof(logic.Disable) == "function" then logic.Disable() return end
+				if value and typeof(logic.Enable) == "function" then
+					logic.Enable()
+					return
+				end
+				if not value and typeof(logic.Disable) == "function" then
+					logic.Disable()
+					return
+				end
 			end
-			if typeof(logic.Toggle) == "function" then logic.Toggle(value)
-			elseif typeof(logic.Set) == "function" then logic.Set(value)
-			elseif typeof(logic.Run) == "function" then logic.Run(value)
+			if typeof(logic.Toggle) == "function" then
+				logic.Toggle(value)
+			elseif typeof(logic.Set) == "function" then
+				logic.Set(value)
+			elseif typeof(logic.Run) == "function" then
+				logic.Run(value)
 			else
-				warn("[AzucarHackerUI] Logic conectada no tiene :Toggle/:Enable+Disable/:Set/:Run.")
+				warn("[AzucarHackerUI] La tabla pasada en Logic no tiene :Toggle/:Enable+Disable/:Set/:Run.")
 			end
 		end
 	end
@@ -187,57 +338,211 @@ local function resolveCallback(config)
 end
 
 local function registerFlag(flagName, controller, initialValue)
-	if not flagName then return end
-	HackerUI.Flags[flagName] = controller
-	HackerUI.FlagValues[flagName] = initialValue
-end
-
-local function stopAllThreads(controller)
-	if not controller._threads then return end
-	for th in pairs(controller._threads) do
-		pcall(task.cancel, th)
+	if not flagName then
+		return
 	end
-	controller._threads = {}
+	UI.Flags[flagName] = controller
+	UI.FlagValues[flagName] = initialValue
+end
+
+-- Devuelve el contenedor donde va la fila y la ventana dueña, sin
+-- importar si el método se llamó sobre un Tab, sobre un Grupo, o por
+-- error sobre la propia ventana.
+local function host(self)
+	if self.List then
+		return self.List, (self.Window or self), self
+	end
+	if self._tabs and self._tabs[1] then
+		local firstTab = self._tabs[1]
+		warn("[AzucarHackerUI] Creaste un control sobre la ventana en vez de sobre una pestaña. "
+			.. "Se agregó a la primera pestaña para que no se pierda.")
+		return firstTab.List, self, firstTab
+	end
+	return nil, (self.Window or self), self
+end
+
+local function nextOrder(owner)
+	owner._rowCount = (owner._rowCount or 0) + 1
+	return owner._rowCount
+end
+
+local function baseRow(self, height)
+	local list, window, owner = host(self)
+	if not list then
+		return nil, window, owner
+	end
+
+	local row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, height or 30),
+		BackgroundColor3 = Theme.Row,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
+	}, { pad(0, 0, 10, 0, 10) })
+
+	return row, window, owner
+end
+
+local function rowLabel(row, text, rightGap)
+	return new("TextLabel", {
+		Text = tostring(text),
+		Font = Theme.Font,
+		TextSize = 13,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -(rightGap or 0), 1, 0),
+		Parent = row,
+	})
+end
+
+local function clickLayer(row)
+	return new("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 1, 0),
+		Parent = row,
+	})
 end
 
 -- ============================================================
--- 	CREATE WINDOW — riel angosto a la izquierda
+-- 	CREATE WINDOW
 -- ============================================================
-function HackerUI:CreateWindow(config)
+function UI:CreateWindow(config)
 	config = config or {}
 
+	local title    = config.Title or config.Name or "Azúcar Hub"
+	local subtitle = config.Subtitle or config.SubTitle or ""
+	local RAIL_W   = config.RailWidth or 46
+	local PANEL_W  = config.PanelWidth or 215
+	local HEADER_H = 30
+	local TOP_Y    = config.TopOffset or 8
+
 	local ScreenGui = new("ScreenGui", {
-		Name = config.Title or "AzucarHackerUI",
+		Name = "AzucarHackerUI",
 		ResetOnSpawn = false,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		DisplayOrder = 999,
-		IgnoreGuiInset = true,
+		-- false a propósito: así Roblox baja el contenido por debajo de
+		-- su propia barra superior y el título/las pestañas dejan de
+		-- quedar tapados (era el motivo de que "no se viera nada" arriba).
+		IgnoreGuiInset = false,
 	})
+
 	local protectGui = rawget(_G, "protectgui") or rawget(_G, "protect_gui")
-	if typeof(protectGui) == "function" then pcall(protectGui, ScreenGui) end
+	if typeof(protectGui) == "function" then
+		pcall(protectGui, ScreenGui)
+	end
 	ScreenGui.Parent = getGuiParent()
 
-	local RAIL_W = config.RailWidth or 48
-	local PANEL_W = config.PanelWidth or 220
-
+	-- Raíz a pantalla completa y transparente: los paneles se ubican
+	-- adentro por offset y nunca quedan recortados por los bordes de un
+	-- contenedor angosto.
 	local Root = new("Frame", {
 		Name = "Root",
-		Size = UDim2.new(0, RAIL_W, 1, 0),
-		Position = UDim2.new(0, 0, 0, 0),
+		Size = UDim2.new(1, 0, 1, 0),
 		BackgroundTransparency = 1,
 		Parent = ScreenGui,
 	})
 
+	-- ---------------- Cabecera con el NOMBRE ----------------
+	local Header = new("Frame", {
+		Name = "Header",
+		Size = UDim2.new(0, RAIL_W + PANEL_W, 0, HEADER_H),
+		Position = UDim2.new(0, 0, 0, TOP_Y),
+		BackgroundColor3 = Theme.Header,
+		BorderSizePixel = 0,
+		Parent = Root,
+	}, { stroke(Theme.Border, 1) })
+
+	local AccentBar = new("Frame", {
+		Name = "AccentBar",
+		Size = UDim2.new(0, 3, 1, 0),
+		BackgroundColor3 = Theme.Active,
+		BorderSizePixel = 0,
+		Parent = Header,
+	})
+	onAccent(function()
+		if AccentBar.Parent then
+			AccentBar.BackgroundColor3 = Theme.Active
+		end
+	end)
+
+	local TitleLabel = new("TextLabel", {
+		Name = "Title",
+		Text = title,
+		Font = Theme.FontBold,
+		TextSize = 14,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 11, 0, 0),
+		Size = UDim2.new(1, -90, 1, 0),
+		Parent = Header,
+	})
+
+	local SubLabel
+	if subtitle ~= "" then
+		TitleLabel.Size = UDim2.new(0, math.min(#title * 9 + 8, 130), 1, 0)
+		SubLabel = new("TextLabel", {
+			Text = subtitle,
+			Font = Theme.Font,
+			TextSize = 11,
+			TextColor3 = Theme.TextDim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			BackgroundTransparency = 1,
+			Position = UDim2.new(0, 11 + TitleLabel.Size.X.Offset + 6, 0, 0),
+			Size = UDim2.new(1, -(TitleLabel.Size.X.Offset + 105), 1, 0),
+			Parent = Header,
+		})
+	end
+
+	local HideBtn = new("TextButton", {
+		Name = "HideBtn",
+		Text = "—",
+		Font = Theme.FontBold,
+		TextSize = 13,
+		TextColor3 = Theme.TextDim,
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, 24, 0, 20),
+		Position = UDim2.new(1, -56, 0.5, -10),
+		Parent = Header,
+	}, { corner(3), stroke(Theme.Border, 1) })
+
+	local CloseBtn = new("TextButton", {
+		Name = "CloseBtn",
+		Text = "X",
+		Font = Theme.FontBold,
+		TextSize = 12,
+		TextColor3 = Theme.TextDim,
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, 24, 0, 20),
+		Position = UDim2.new(1, -28, 0.5, -10),
+		Parent = Header,
+	}, { corner(3), stroke(Theme.Border, 1) })
+
+	-- ---------------- Riel de pestañas ----------------
 	local Rail = new("Frame", {
 		Name = "Rail",
-		Size = UDim2.new(0, RAIL_W, 1, 0),
+		Size = UDim2.new(0, RAIL_W, 1, -(TOP_Y + HEADER_H + 10)),
+		Position = UDim2.new(0, 0, 0, TOP_Y + HEADER_H),
 		BackgroundColor3 = Theme.Rail,
+		BorderSizePixel = 0,
 		Parent = Root,
 	}, { stroke(Theme.Border, 1) })
 
 	local RailList = new("ScrollingFrame", {
+		Name = "RailList",
 		Size = UDim2.new(1, 0, 1, 0),
 		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
 		ScrollBarThickness = 2,
 		ScrollBarImageColor3 = Theme.Border,
 		CanvasSize = UDim2.new(0, 0, 0, 0),
@@ -245,27 +550,110 @@ function HackerUI:CreateWindow(config)
 		Parent = Rail,
 	}, {
 		new("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
-		pad(6, 6, 4, 6, 4),
+		pad(0, 6, 5, 6, 5),
+	})
+
+	-- ---------------- Aviso "sin pestañas todavía" ----------------
+	-- Si tu script muere antes de crear la primera pestaña, esto te lo
+	-- dice en pantalla en vez de dejarte un panel negro mudo.
+	local EmptyHint = new("TextLabel", {
+		Name = "EmptyHint",
+		Text = "Sin pestañas.\nRevisá la consola (F9):\nalgo cortó tu script\nantes de crearlas.",
+		Font = Theme.Font,
+		TextSize = 12,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		BackgroundColor3 = Theme.Panel,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, PANEL_W, 0, 90),
+		Position = UDim2.new(0, RAIL_W, 0, TOP_Y + HEADER_H),
+		Parent = Root,
+	}, { stroke(Theme.Border, 1), pad(10) })
+
+	-- ---------------- Notificaciones ----------------
+	local NotifyHolder = new("Frame", {
+		Name = "Notifications",
+		Size = UDim2.new(0, 250, 1, -20),
+		Position = UDim2.new(1, -262, 0, 10),
+		BackgroundTransparency = 1,
+		Parent = ScreenGui,
+	}, {
+		new("UIListLayout", {
+			Padding = UDim.new(0, 6),
+			VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
 	})
 
 	local Window = setmetatable({
-		ScreenGui = ScreenGui,
-		Root = Root,
-		Rail = Rail,
-		RailList = RailList,
-		RAIL_W = RAIL_W,
-		PANEL_W = PANEL_W,
-		_tabs = {},
+		ScreenGui   = ScreenGui,
+		Root        = Root,
+		Header      = Header,
+		TitleLabel  = TitleLabel,
+		SubLabel    = SubLabel,
+		Rail        = Rail,
+		RailList    = RailList,
+		EmptyHint   = EmptyHint,
+		NotifyHolder = NotifyHolder,
+		RAIL_W      = RAIL_W,
+		PANEL_W     = PANEL_W,
+		HEADER_H    = HEADER_H,
+		TOP_Y       = TOP_Y,
+		_tabs        = {},
 		_connections = {},
-		_visible = true,
-	}, HackerUI)
+		_visible     = true,
+	}, UI)
 
 	local function track(conn)
 		table.insert(Window._connections, conn)
 		return conn
 	end
 
-	-- ---------------- Tecla K: abre/cierra todo ----------------
+	track(HideBtn.MouseButton1Click:Connect(function()
+		Window:Hide()
+	end))
+	track(CloseBtn.MouseButton1Click:Connect(function()
+		Window:Hide()
+	end))
+
+	HideBtn.MouseEnter:Connect(function() tween(HideBtn, { BackgroundColor3 = Theme.Border }) end)
+	HideBtn.MouseLeave:Connect(function() tween(HideBtn, { BackgroundColor3 = Theme.PanelAlt }) end)
+	CloseBtn.MouseEnter:Connect(function() tween(CloseBtn, { BackgroundColor3 = Theme.Active }) end)
+	CloseBtn.MouseLeave:Connect(function() tween(CloseBtn, { BackgroundColor3 = Theme.PanelAlt }) end)
+
+	-- ---------------- Arrastrar desde la cabecera ----------------
+	do
+		local dragging, dragStart, startOffset = false, nil, nil
+
+		track(Header.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startOffset = Vector2.new(Header.Position.X.Offset, Header.Position.Y.Offset)
+			end
+		end))
+
+		track(UserInputService.InputChanged:Connect(function(input)
+			if not dragging then return end
+			if input.UserInputType ~= Enum.UserInputType.MouseMovement
+				and input.UserInputType ~= Enum.UserInputType.Touch then
+				return
+			end
+			local delta = input.Position - dragStart
+			Window:MoveTo(startOffset.X + delta.X, startOffset.Y + delta.Y)
+		end))
+
+		track(UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end))
+	end
+
+	-- ---------------- Tecla para abrir/cerrar ----------------
 	local toggleKey = config.ToggleKey or Enum.KeyCode.K
 	track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if gameProcessed then return end
@@ -274,81 +662,186 @@ function HackerUI:CreateWindow(config)
 		end
 	end))
 
-	table.insert(HackerUI.Windows, Window)
+	table.insert(UI.Windows, Window)
 	return Window
 end
 
-function HackerUI:Show()
+-- ============================================================
+-- 	MÉTODOS DE VENTANA
+-- ============================================================
+function UI:MoveTo(offsetX, offsetY)
+	self.TOP_Y = offsetY
+	self._originX = offsetX
+
+	self.Header.Position = UDim2.new(0, offsetX, 0, offsetY)
+	self.Rail.Position   = UDim2.new(0, offsetX, 0, offsetY + self.HEADER_H)
+	self.Rail.Size       = UDim2.new(0, self.RAIL_W, 1, -(offsetY + self.HEADER_H + 10))
+
+	if self.EmptyHint then
+		self.EmptyHint.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
+	end
+
+	for _, tab in ipairs(self._tabs) do
+		tab.Panel.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
+		tab.Panel.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 10))
+		for _, group in pairs(tab._groupPanels) do
+			group.Instance.Position = UDim2.new(0, offsetX + self.RAIL_W + self.PANEL_W, 0, offsetY + self.HEADER_H)
+			group.Instance.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 10))
+		end
+	end
+end
+
+function UI:SetTitle(text)
+	if self.TitleLabel then
+		self.TitleLabel.Text = tostring(text)
+	end
+end
+
+function UI:Show()
 	self.Root.Visible = true
 	self._visible = true
 end
 
-function HackerUI:Hide()
+function UI:Hide()
 	self.Root.Visible = false
 	self._visible = false
 end
 
-function HackerUI:Toggle()
-	if self._visible then self:Hide() else self:Show() end
+function UI:Toggle()
+	if self._visible then
+		self:Hide()
+	else
+		self:Show()
+	end
 end
 
-function HackerUI:Destroy()
-	if self._connections then
-		for _, c in ipairs(self._connections) do
-			pcall(function() c:Disconnect() end)
+function UI:Notify(config)
+	config = config or {}
+	local holder = self.NotifyHolder
+	if not holder then return end
+
+	local card = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 56),
+		BackgroundColor3 = Theme.Panel,
+		BorderSizePixel = 0,
+		Parent = holder,
+	}, { corner(4), stroke(Theme.Border, 1), pad(8) })
+
+	new("Frame", {
+		Size = UDim2.new(0, 2, 1, 0),
+		Position = UDim2.new(0, -8, 0, -8),
+		BackgroundColor3 = Theme.Active,
+		BorderSizePixel = 0,
+		Parent = card,
+	})
+
+	new("TextLabel", {
+		Text = config.Title or "Aviso",
+		Font = Theme.FontBold,
+		TextSize = 12,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 15),
+		Parent = card,
+	})
+
+	new("TextLabel", {
+		Text = config.Content or config.Text or "",
+		Font = Theme.Font,
+		TextSize = 11,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextWrapped = true,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 0, 0, 17),
+		Size = UDim2.new(1, 0, 1, -17),
+		Parent = card,
+	})
+
+	task.delay(config.Duration or 3, function()
+		pcall(function() card:Destroy() end)
+	end)
+	return card
+end
+
+function UI:Destroy()
+	for _, conn in ipairs(self._connections or {}) do
+		pcall(function() conn:Disconnect() end)
+	end
+	if self.ScreenGui then
+		pcall(function() self.ScreenGui:Destroy() end)
+	end
+	for i, w in ipairs(UI.Windows) do
+		if w == self then
+			table.remove(UI.Windows, i)
+			break
 		end
 	end
-	if self.ScreenGui then self.ScreenGui:Destroy() end
-	for i, w in ipairs(HackerUI.Windows) do
-		if w == self then table.remove(HackerUI.Windows, i) break end
-	end
 end
 
 -- ============================================================
--- 	CREATE TAB — botón en el riel + columna que aparece al lado
+-- 	CREATE TAB
 -- ============================================================
-function HackerUI:CreateTab(config)
+function UI:CreateTab(config)
 	config = config or {}
-	local name = config.Text or config.Name or "Tab"
+	local name = config.Text or config.Name or ("Tab " .. (#self._tabs + 1))
 	local isFirst = #self._tabs == 0
 
+	if self.EmptyHint then
+		self.EmptyHint:Destroy()
+		self.EmptyHint = nil
+	end
+
+	local originX = self._originX or 0
+
+	-- Botón en el riel
 	local TabBtn = new("TextButton", {
-		Text = config.Icon or string.sub(name, 1, 1),
+		Name = name,
+		Text = config.Icon or string.upper(string.sub(name, 1, 1)),
 		Font = Theme.FontBold,
 		TextSize = 13,
 		TextColor3 = isFirst and Theme.Active or Theme.TextDim,
 		AutoButtonColor = false,
-		BackgroundColor3 = Theme.Panel,
+		BackgroundColor3 = isFirst and Theme.PanelAlt or Theme.Panel,
+		BorderSizePixel = 0,
 		Size = UDim2.new(1, 0, 0, 34),
 		Parent = self.RailList,
-	}, { corner(4), stroke(Theme.Border, 1) })
-	hoverTint(TabBtn, Theme.Panel, Theme.PanelAlt)
+	}, { corner(3), stroke(Theme.Border, 1) })
 
+	-- Panel de la pestaña
 	local Panel = new("Frame", {
 		Name = name .. "Panel",
-		Size = UDim2.new(0, self.PANEL_W, 1, 0),
-		Position = UDim2.new(0, self.RAIL_W, 0, 0),
+		Size = UDim2.new(0, self.PANEL_W, 1, -(self.TOP_Y + self.HEADER_H + 10)),
+		Position = UDim2.new(0, originX + self.RAIL_W, 0, self.TOP_Y + self.HEADER_H),
 		BackgroundColor3 = Theme.Panel,
+		BorderSizePixel = 0,
 		Visible = isFirst,
 		Parent = self.Root,
 	}, { stroke(Theme.Border, 1) })
 
-	new("TextLabel", {
-		Text = name,
+	local PanelTitle = new("TextLabel", {
+		Name = "PanelTitle",
+		Text = string.upper(name),
 		Font = Theme.FontBold,
-		TextSize = 14,
+		TextSize = 12,
 		TextColor3 = Theme.Text,
-		BackgroundColor3 = Theme.PanelAlt,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		Size = UDim2.new(1, 0, 0, 30),
+		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 26),
 		Parent = Panel,
-	}, { pad(0, 0, 0, 0, 10) })
+	}, { pad(0, 0, 10, 0, 10) })
 
 	local List = new("ScrollingFrame", {
-		Size = UDim2.new(1, 0, 1, -30),
-		Position = UDim2.new(0, 0, 0, 30),
+		Name = "List",
+		Size = UDim2.new(1, 0, 1, -26),
+		Position = UDim2.new(0, 0, 0, 26),
 		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
 		ScrollBarThickness = 3,
 		ScrollBarImageColor3 = Theme.Border,
 		CanvasSize = UDim2.new(0, 0, 0, 0),
@@ -356,101 +849,150 @@ function HackerUI:CreateTab(config)
 		Parent = Panel,
 	}, {
 		new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
+		pad(0, 4, 0, 8, 0),
 	})
 
 	local Tab = setmetatable({
-		Window = self,
-		Button = TabBtn,
-		Panel = Panel,
-		List = List,
-		_rowCount = 0,
+		Window       = self,
+		Button       = TabBtn,
+		Panel        = Panel,
+		PanelTitle   = PanelTitle,
+		List         = List,
+		Name         = name,
+		_rowCount    = 0,
 		_groupPanels = {},
-	}, HackerUI)
+	}, UI)
+
+	onAccent(function()
+		if TabBtn.Parent and Panel.Visible then
+			TabBtn.TextColor3 = Theme.Active
+		end
+	end)
+
+	-- En el riel solo entra la inicial de la pestaña. Este globito muestra
+	-- el nombre completo al pasar el mouse, así no hay que adivinar qué
+	-- es cada letra cuando tenés muchas pestañas.
+	local Tip = new("TextLabel", {
+		Name = "Tip",
+		Text = " " .. name .. " ",
+		Font = Theme.Font,
+		TextSize = 11,
+		TextColor3 = Theme.Text,
+		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
+		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.new(0, 0, 0, 20),
+		Position = UDim2.new(1, 6, 0.5, -10),
+		Visible = false,
+		ZIndex = 30,
+		Parent = TabBtn,
+	}, { corner(3), stroke(Theme.Border, 1) })
+
+	TabBtn.MouseEnter:Connect(function()
+		Tip.Visible = true
+		if not Panel.Visible then
+			tween(TabBtn, { BackgroundColor3 = Theme.PanelAlt })
+		end
+	end)
+	TabBtn.MouseLeave:Connect(function()
+		Tip.Visible = false
+		if not Panel.Visible then
+			tween(TabBtn, { BackgroundColor3 = Theme.Panel })
+		end
+	end)
 
 	table.insert(self._connections, TabBtn.MouseButton1Click:Connect(function()
-		for _, t in ipairs(self._tabs) do
-			t.Panel.Visible = false
-			t.Button.TextColor3 = Theme.TextDim
-			for _, gp in pairs(t._groupPanels) do
-				gp.Instance.Visible = false
-				gp.Arrow.Text = "▸"
-			end
-		end
-		Panel.Visible = true
-		TabBtn.TextColor3 = Theme.Active
+		self:SelectTab(name)
 	end))
 
 	table.insert(self._tabs, Tab)
 	return Tab
 end
 
+function UI:SelectTab(name)
+	for _, tab in ipairs(self._tabs or {}) do
+		local selected = (tab.Name == name)
+		tab.Panel.Visible = selected
+		tab.Button.TextColor3 = selected and Theme.Active or Theme.TextDim
+		tab.Button.BackgroundColor3 = selected and Theme.PanelAlt or Theme.Panel
+		if not selected then
+			for _, group in pairs(tab._groupPanels) do
+				group.Instance.Visible = false
+				group.Arrow.Text = ">"
+			end
+		end
+	end
+end
+
 -- ============================================================
--- 	CREATE GROUP — la fila con flechita que despliega la columna
--- 	lateral (como en la referencia: adentro va la lógica de ese grupo).
+-- 	CREATE GROUP — fila con flecha que abre otra columna al lado
 -- ============================================================
-function HackerUI:CreateGroup(config)
+function UI:CreateGroup(config)
 	config = config or {}
 	local name = config.Text or config.Name or "Grupo"
-	local window = self.Window or self
+	local list, window, owner = host(self)
+	if not list then
+		warn("[AzucarHackerUI] CreateGroup necesita una pestaña. Creá primero un CreateTab.")
+		return setmetatable({}, Stub)
+	end
 
 	local Row = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 30),
-		BackgroundColor3 = Theme.Panel,
-		LayoutOrder = self._rowCount,
-		Parent = self.List,
+		BackgroundColor3 = Theme.Row,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
 	}, { pad(0, 0, 10, 0, 10) })
-	hoverTint(Row, Theme.Panel, Theme.PanelAlt)
-	self._rowCount += 1
+	hoverRow(Row)
 
-	new("TextLabel", {
-		Text = name,
-		Font = Theme.Font,
-		TextSize = 13,
-		TextColor3 = Theme.Text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		BackgroundTransparency = 1,
-		Size = UDim2.new(1, -22, 1, 0),
-		Parent = Row,
-	})
+	rowLabel(Row, name, 20)
 
 	local Arrow = new("TextLabel", {
-		Text = "▸",
+		Text = ">",
 		Font = Theme.FontBold,
 		TextSize = 13,
 		TextColor3 = Theme.TextDim,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 20, 1, 0),
-		Position = UDim2.new(1, -20, 0, 0),
+		Size = UDim2.new(0, 16, 1, 0),
+		Position = UDim2.new(1, -16, 0, 0),
 		Parent = Row,
 	})
 
-	-- Panel lateral: aparece a la derecha del panel de este Tab.
+	local originX = window._originX or 0
+
 	local GroupPanel = new("Frame", {
 		Name = name .. "GroupPanel",
-		Size = UDim2.new(0, window.PANEL_W, 1, 0),
-		Position = UDim2.new(0, window.RAIL_W + window.PANEL_W, 0, 0),
+		Size = UDim2.new(0, window.PANEL_W, 1, -(window.TOP_Y + window.HEADER_H + 10)),
+		Position = UDim2.new(0, originX + window.RAIL_W + window.PANEL_W, 0, window.TOP_Y + window.HEADER_H),
 		BackgroundColor3 = Theme.Panel,
+		BorderSizePixel = 0,
 		Visible = false,
 		Parent = window.Root,
 	}, { stroke(Theme.Border, 1) })
 
-	new("TextLabel", {
-		Text = name,
+	local GroupTitle = new("TextLabel", {
+		Text = string.upper(name),
 		Font = Theme.FontBold,
-		TextSize = 14,
+		TextSize = 12,
 		TextColor3 = Theme.Active,
-		BackgroundColor3 = Theme.PanelAlt,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		Size = UDim2.new(1, 0, 0, 30),
+		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 26),
 		Parent = GroupPanel,
-	}, { pad(0, 0, 0, 0, 10) })
+	}, { pad(0, 0, 10, 0, 10) })
+	onAccent(function()
+		if GroupTitle.Parent then
+			GroupTitle.TextColor3 = Theme.Active
+		end
+	end)
 
 	local GroupList = new("ScrollingFrame", {
-		Size = UDim2.new(1, 0, 1, -30),
-		Position = UDim2.new(0, 0, 0, 30),
+		Size = UDim2.new(1, 0, 1, -26),
+		Position = UDim2.new(0, 0, 0, 26),
 		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
 		ScrollBarThickness = 3,
 		ScrollBarImageColor3 = Theme.Border,
 		CanvasSize = UDim2.new(0, 0, 0, 0),
@@ -458,89 +1000,295 @@ function HackerUI:CreateGroup(config)
 		Parent = GroupPanel,
 	}, {
 		new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
+		pad(0, 4, 0, 8, 0),
 	})
 
-	self._groupPanels[name] = { Instance = GroupPanel, Arrow = Arrow }
+	local siblings = owner._groupPanels or self._groupPanels
+	if siblings then
+		siblings[name] = { Instance = GroupPanel, Arrow = Arrow }
+	end
 
-	local ClickOverlay = new("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = Row })
-	table.insert(window._connections, ClickOverlay.MouseButton1Click:Connect(function()
-		-- cerrar los demás grupos de este mismo tab antes de abrir este
-		for gname, gp in pairs(self._groupPanels) do
-			if gp.Instance ~= GroupPanel then
-				gp.Instance.Visible = false
-				gp.Arrow.Text = "▸"
+	local Click = clickLayer(Row)
+	table.insert(window._connections, Click.MouseButton1Click:Connect(function()
+		if siblings then
+			for _, gp in pairs(siblings) do
+				if gp.Instance ~= GroupPanel then
+					gp.Instance.Visible = false
+					gp.Arrow.Text = ">"
+				end
 			end
 		end
 		GroupPanel.Visible = not GroupPanel.Visible
-		Arrow.Text = GroupPanel.Visible and "◂" or "▸"
+		Arrow.Text = GroupPanel.Visible and "<" or ">"
+		Arrow.TextColor3 = GroupPanel.Visible and Theme.Active or Theme.TextDim
 	end))
 
-	local Group = setmetatable({
-		Window = window,
-		Panel = GroupPanel,
-		List = GroupList,
-		_rowCount = 0,
+	return setmetatable({
+		Window       = window,
+		Panel        = GroupPanel,
+		List         = GroupList,
+		Name         = name,
+		_rowCount    = 0,
 		_groupPanels = {},
-	}, HackerUI)
-
-	return Group
+	}, UI)
 end
 
 -- ============================================================
--- 	TOGGLE — el cuadradito se pinta ROJO cuando está activo
+-- 	SECCIÓN / ETIQUETA / PÁRRAFO / SEPARADOR
 -- ============================================================
-function HackerUI:CreateToggle(config)
-	config = config or {}
-	local callback = resolveCallback(config)
-	local state = config.Default
-	if state == nil then state = config.CurrentValue end
-	if state == nil then state = false end
+function UI:CreateSection(config)
+	local text = config
+	if typeof(config) == "table" then
+		text = config.Text or config.Name or "Sección"
+	end
 
-	local Row = new("Frame", {
-		Size = UDim2.new(1, 0, 0, 30),
-		BackgroundColor3 = Theme.Panel,
-		LayoutOrder = self._rowCount,
-		Parent = self.List,
-	}, { pad(0, 0, 10, 0, 10) })
-	hoverTint(Row, Theme.Panel, Theme.PanelAlt)
-	self._rowCount += 1
+	local list, _, owner = host(self)
+	if not list then return setmetatable({}, Stub) end
 
-	new("TextLabel", {
-		Text = config.Text or config.Name or "Toggle",
-		Font = Theme.Font,
-		TextSize = 13,
-		TextColor3 = Theme.Text,
+	local holder = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 24),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
+	}, { pad(0, 6, 10, 0, 10) })
+
+	local label = new("TextLabel", {
+		Text = string.upper(tostring(text)),
+		Font = Theme.FontBold,
+		TextSize = 11,
+		TextColor3 = Theme.TextDim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, -26, 1, 0),
-		Parent = Row,
+		Size = UDim2.new(1, 0, 1, 0),
+		Parent = holder,
 	})
+
+	local controller = setmetatable({ Instance = label }, UI)
+	function controller:Set(newText)
+		label.Text = string.upper(tostring(newText))
+	end
+	return controller
+end
+
+-- Alias: mucha gente lo llama CreateSectionLabel (así se llamaba en SugarUI).
+function UI:CreateSectionLabel(config)
+	return self:CreateSection(config)
+end
+
+function UI:CreateLabel(config)
+	local text = config
+	if typeof(config) == "table" then
+		text = config.Text or config.Name or ""
+	end
+
+	local list, _, owner = host(self)
+	if not list then return setmetatable({}, Stub) end
+
+	local holder = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = Theme.Row,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
+	}, { pad(0, 7, 10, 7, 10) })
+
+	local label = new("TextLabel", {
+		Text = tostring(text),
+		Font = Theme.Font,
+		TextSize = 12,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextWrapped = true,
+		BackgroundTransparency = 1,
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Size = UDim2.new(1, 0, 0, 0),
+		Parent = holder,
+	})
+
+	local controller = setmetatable({ Instance = label }, UI)
+	function controller:Set(newText)
+		label.Text = tostring(newText)
+	end
+	return controller
+end
+
+function UI:CreateParagraph(config)
+	config = config or {}
+	local list, _, owner = host(self)
+	if not list then return setmetatable({}, Stub) end
+
+	local holder = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = Theme.Row,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
+	}, {
+		pad(0, 8, 10, 8, 10),
+		new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }),
+	})
+
+	local titleLabel = new("TextLabel", {
+		Text = config.Title or config.Text or config.Name or "",
+		Font = Theme.FontBold,
+		TextSize = 12,
+		TextColor3 = Theme.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextWrapped = true,
+		BackgroundTransparency = 1,
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Size = UDim2.new(1, 0, 0, 0),
+		LayoutOrder = 1,
+		Parent = holder,
+	})
+
+	local bodyLabel = new("TextLabel", {
+		Text = config.Content or config.Description or "",
+		Font = Theme.Font,
+		TextSize = 11,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextWrapped = true,
+		BackgroundTransparency = 1,
+		AutomaticSize = Enum.AutomaticSize.Y,
+		Size = UDim2.new(1, 0, 0, 0),
+		LayoutOrder = 2,
+		Parent = holder,
+	})
+
+	local controller = setmetatable({ Instance = holder }, UI)
+	function controller:Set(newTitle, newContent)
+		if newTitle ~= nil then titleLabel.Text = tostring(newTitle) end
+		if newContent ~= nil then bodyLabel.Text = tostring(newContent) end
+	end
+	return controller
+end
+
+function UI:CreateDivider()
+	local list, _, owner = host(self)
+	if not list then return setmetatable({}, Stub) end
+
+	local holder = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 9),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
+	}, { pad(0, 4, 10, 4, 10) })
+
+	new("Frame", {
+		Size = UDim2.new(1, 0, 0, 1),
+		BackgroundColor3 = Theme.Border,
+		BorderSizePixel = 0,
+		Parent = holder,
+	})
+
+	return setmetatable({ Instance = holder }, UI)
+end
+
+-- ============================================================
+-- 	BOTÓN
+-- ============================================================
+function UI:CreateButton(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+	local text = config.Text or config.Name or config.Title or "Botón"
+
+	local list, window, owner = host(self)
+	if not list then return setmetatable({}, Stub) end
+
+	local Btn = new("TextButton", {
+		Text = text,
+		Font = Theme.FontBold,
+		TextSize = 12,
+		TextColor3 = Theme.Text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		AutoButtonColor = false,
+		BackgroundColor3 = Theme.Row,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 30),
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
+	}, { pad(0, 0, 10, 0, 10) })
+	hoverRow(Btn)
+
+	local Button = setmetatable({ Instance = Btn, Callback = callback, _threads = {} }, UI)
+
+	function Button:Set(...)
+		Btn.TextColor3 = Theme.Active
+		task.delay(0.15, function()
+			if Btn.Parent then Btn.TextColor3 = Theme.Text end
+		end)
+		return safeCall(self, self.Callback, ...)
+	end
+	Button.Fire = Button.Set
+
+	function Button:Stop()
+		stopAllThreads(self)
+	end
+
+	table.insert(window._connections, Btn.MouseButton1Click:Connect(function()
+		Button:Set()
+	end))
+
+	registerFlag(config.Flag, Button, nil)
+	return Button
+end
+
+-- ============================================================
+-- 	TOGGLE
+-- ============================================================
+function UI:CreateToggle(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+
+	local state = config.Default
+	if state == nil then state = config.CurrentValue end
+	if state == nil then state = false end
+	state = not not state
+
+	local Row, window = baseRow(self, 30)
+	if not Row then return setmetatable({}, Stub) end
+	hoverRow(Row)
+
+	rowLabel(Row, config.Text or config.Name or "Opción", 26)
 
 	local Box = new("Frame", {
 		Size = UDim2.new(0, 14, 0, 14),
 		Position = UDim2.new(1, -14, 0.5, -7),
 		BackgroundColor3 = state and Theme.Active or Theme.PanelAlt,
+		BorderSizePixel = 0,
 		Parent = Row,
 	}, { corner(3), stroke(Theme.Border, 1) })
 
-	local ClickOverlay = new("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = Row })
+	local Toggle = setmetatable({ Box = Box, Value = state, Callback = callback, _threads = {} }, UI)
 
-	local Toggle = setmetatable({ Box = Box, Value = state, Callback = callback, _threads = {} }, HackerUI)
+	onAccent(function()
+		if Box.Parent then
+			Box.BackgroundColor3 = Toggle.Value and Theme.Active or Theme.PanelAlt
+		end
+	end)
 
 	function Toggle:Set(newState)
 		newState = not not newState
 		self.Value = newState
-		TweenService:Create(Box, TweenInfo.new(0.1), { BackgroundColor3 = newState and Theme.Active or Theme.PanelAlt }):Play()
-		HackerUI.FlagValues[config.Flag] = newState
-		safeCall(self, self.Callback, newState)
+		tween(Box, { BackgroundColor3 = newState and Theme.Active or Theme.PanelAlt })
+		UI.FlagValues[config.Flag] = newState
+		return safeCall(self, self.Callback, newState)
+	end
+
+	function Toggle:Get()
+		return self.Value
 	end
 
 	function Toggle:Stop()
 		stopAllThreads(self)
 	end
 
-	table.insert(self.Window._connections, ClickOverlay.MouseButton1Click:Connect(function()
+	local Click = clickLayer(Row)
+	table.insert(window._connections, Click.MouseButton1Click:Connect(function()
 		Toggle:Set(not Toggle.Value)
 	end))
 
@@ -549,10 +1297,9 @@ function HackerUI:CreateToggle(config)
 end
 
 -- ============================================================
--- 	SLIDER — acepta Min/Max o Range={min,max}, Default o CurrentValue,
--- 	Increment o Step
+-- 	SLIDER
 -- ============================================================
-function HackerUI:CreateSlider(config)
+function UI:CreateSlider(config)
 	config = config or {}
 	local callback = resolveCallback(config)
 
@@ -563,115 +1310,176 @@ function HackerUI:CreateSlider(config)
 	end
 	local min = rangeMin or 0
 	local max = rangeMax or 100
+	if max <= min then max = min + 1 end
+
 	local step = config.Increment or config.Step or 1
 	if step <= 0 then step = 1 end
 
+	local decimals = 0
+	if step < 1 then
+		decimals = #tostring(step):gsub("^%d*%.?", "")
+		if decimals > 3 then decimals = 3 end
+	end
+
 	local function snap(v)
 		v = math.clamp(v, min, max)
-		return min + math.floor((v - min) / step + 0.5) * step
+		local snapped = min + math.floor((v - min) / step + 0.5) * step
+		return math.clamp(snapped, min, max)
+	end
+
+	local function show(v)
+		if decimals > 0 then
+			return string.format("%." .. decimals .. "f", v)
+		end
+		return tostring(math.floor(v + 0.5))
 	end
 
 	local value = snap(config.Default or config.CurrentValue or min)
 
-	local Row = new("Frame", {
-		Size = UDim2.new(1, 0, 0, 42),
-		BackgroundColor3 = Theme.Panel,
-		LayoutOrder = self._rowCount,
-		Parent = self.List,
-	}, { pad(0, 6, 10, 6, 10) })
-	self._rowCount += 1
+	local Row, window = baseRow(self, 42)
+	if not Row then return setmetatable({}, Stub) end
+
+	-- El slider es más alto que una fila normal, así que necesita su
+	-- propio margen vertical. Se cambia el padding con cuidado: si por lo
+	-- que sea la fila no trajera uno, no se revienta acá.
+	local oldPad = Row:FindFirstChildOfClass("UIPadding")
+	if oldPad then
+		oldPad:Destroy()
+	end
+	pad(0, 6, 10, 6, 10).Parent = Row
 
 	new("TextLabel", {
 		Text = config.Text or config.Name or "Valor",
 		Font = Theme.Font,
-		TextSize = 13,
+		TextSize = 12,
 		TextColor3 = Theme.Text,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, -40, 0, 16),
+		Size = UDim2.new(1, -52, 0, 15),
 		Parent = Row,
 	})
 
 	local ValueLabel = new("TextLabel", {
-		Text = tostring(value),
+		Text = show(value),
 		Font = Theme.FontBold,
 		TextSize = 12,
 		TextColor3 = Theme.Active,
 		TextXAlignment = Enum.TextXAlignment.Right,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(0, 40, 0, 16),
-		Position = UDim2.new(1, -40, 0, 0),
+		Size = UDim2.new(0, 50, 0, 15),
+		Position = UDim2.new(1, -50, 0, 0),
 		Parent = Row,
 	})
+	onAccent(function()
+		if ValueLabel.Parent then
+			ValueLabel.TextColor3 = Theme.Active
+		end
+	end)
 
 	local Track = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 4),
-		Position = UDim2.new(0, 0, 0, 24),
+		Position = UDim2.new(0, 0, 0, 22),
 		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
 		Parent = Row,
-	})
+	}, { corner(2) })
 
-	local function ratio(v) return (v - min) / math.max(max - min, 1e-6) end
+	local function ratio(v)
+		return (v - min) / (max - min)
+	end
 
 	local Fill = new("Frame", {
 		Size = UDim2.new(ratio(value), 0, 1, 0),
 		BackgroundColor3 = Theme.Active,
+		BorderSizePixel = 0,
 		Parent = Track,
-	})
+	}, { corner(2) })
+	onAccent(function()
+		if Fill.Parent then
+			Fill.BackgroundColor3 = Theme.Active
+		end
+	end)
 
 	local Knob = new("Frame", {
 		Size = UDim2.new(0, 10, 0, 10),
 		Position = UDim2.new(ratio(value), -5, 0.5, -5),
 		BackgroundColor3 = Theme.Text,
+		BorderSizePixel = 0,
 		Parent = Track,
 	}, { corner(5) })
 
-	local Slider = setmetatable({ Track = Track, Fill = Fill, Knob = Knob, Value = value, Callback = callback, _threads = {} }, HackerUI)
+	local Slider = setmetatable({
+		Track = Track, Fill = Fill, Knob = Knob,
+		Value = value, Min = min, Max = max,
+		Callback = callback, _threads = {},
+	}, UI)
 
-	local function paint(v)
+	local function repaint(v)
 		local r = ratio(v)
 		Fill.Size = UDim2.new(r, 0, 1, 0)
 		Knob.Position = UDim2.new(r, -5, 0.5, -5)
-		ValueLabel.Text = tostring(v)
+		ValueLabel.Text = show(v)
 	end
 
 	function Slider:Set(newValue)
-		newValue = snap(newValue)
+		newValue = snap(tonumber(newValue) or min)
 		self.Value = newValue
-		paint(newValue)
-		HackerUI.FlagValues[config.Flag] = newValue
-		safeCall(self, self.Callback, newValue)
+		repaint(newValue)
+		UI.FlagValues[config.Flag] = newValue
+		return safeCall(self, self.Callback, newValue)
+	end
+
+	function Slider:Get()
+		return self.Value
 	end
 
 	function Slider:Stop()
 		stopAllThreads(self)
 	end
 
+	-- Arrastre aislado: el listener de movimiento es global, así que cada
+	-- slider comprueba que el mouse esté sobre SU propio riel antes de
+	-- moverse. Y el fin del arrastre se detecta con InputEnded (que
+	-- siempre dispara), nunca con input.Changed.
 	local dragging = false
+
 	local function setFromX(xPos)
-		local relative = math.clamp((xPos - Track.AbsolutePosition.X) / Track.AbsoluteSize.X, 0, 1)
+		local relative = math.clamp((xPos - Track.AbsolutePosition.X) / math.max(Track.AbsoluteSize.X, 1), 0, 1)
 		Slider:Set(min + relative * (max - min))
 	end
-	local function isMouseOverThisTrack()
-		local ok, mousePos = pcall(function() return UserInputService:GetMouseLocation() end)
+
+	local function mouseIsOnThisTrack()
+		local ok, mousePos = pcall(function()
+			return UserInputService:GetMouseLocation()
+		end)
 		if not ok then return true end
 		local tPos, tSize = Track.AbsolutePosition, Track.AbsoluteSize
-		return mousePos.Y >= tPos.Y - 20 and mousePos.Y <= tPos.Y + tSize.Y + 20
+		return mousePos.Y >= tPos.Y - 22 and mousePos.Y <= tPos.Y + tSize.Y + 22
 	end
 
-	table.insert(self.Window._connections, Track.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+	table.insert(window._connections, Track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true
 			setFromX(input.Position.X)
 		end
 	end))
-	table.insert(self.Window._connections, UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			if isMouseOverThisTrack() then setFromX(input.Position.X) end
+
+	table.insert(window._connections, UserInputService.InputChanged:Connect(function(input)
+		if not dragging then return end
+		if input.UserInputType ~= Enum.UserInputType.MouseMovement
+			and input.UserInputType ~= Enum.UserInputType.Touch then
+			return
+		end
+		if mouseIsOnThisTrack() then
+			setFromX(input.Position.X)
 		end
 	end))
-	table.insert(self.Window._connections, UserInputService.InputEnded:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+
+	table.insert(window._connections, UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = false
 		end
 	end))
@@ -681,61 +1489,24 @@ function HackerUI:CreateSlider(config)
 end
 
 -- ============================================================
--- 	BOTÓN — ancho automático, texto blanco fijo
+-- 	DROPDOWN
 -- ============================================================
-function HackerUI:CreateButton(config)
+function UI:CreateDropdown(config)
 	config = config or {}
 	local callback = resolveCallback(config)
+	local options = config.Options or config.Values or {}
 
-	local Btn = new("TextButton", {
-		Text = config.Text or config.Name or "Botón",
-		Font = Theme.FontBold,
-		TextSize = 13,
-		TextColor3 = Color3.fromRGB(255, 255, 255),
-		AutoButtonColor = false,
-		BackgroundColor3 = Theme.PanelAlt,
-		AutomaticSize = Enum.AutomaticSize.X,
-		Size = UDim2.new(1, 0, 0, 30),
-		LayoutOrder = self._rowCount,
-		Parent = self.List,
-	}, { stroke(Theme.Border, 1) })
-	self._rowCount += 1
-
-	hoverTint(Btn, Theme.PanelAlt, Theme.Active)
-
-	local Button = setmetatable({ Instance = Btn, Callback = callback, _threads = {} }, HackerUI)
-
-	function Button:Set(...)
-		safeCall(self, self.Callback, ...)
-	end
-	function Button:Stop()
-		stopAllThreads(self)
-	end
-
-	table.insert(self.Window._connections, Btn.MouseButton1Click:Connect(function()
-		Button:Set()
-	end))
-
-	registerFlag(config.Flag, Button, nil)
-	return Button
-end
-
--- ============================================================
--- 	DROPDOWN — con detección de Player/tabla-con-.Name, y Default
--- 	inválido se ignora en vez de mostrar basura
--- ============================================================
-function HackerUI:CreateDropdown(config)
-	config = config or {}
-	local callback = resolveCallback(config)
-	local options = config.Options or {}
-
-	local function displayOption(value)
-		if typeof(value) == "Instance" and value.Name then return value.Name end
-		if typeof(value) == "table" and value.Name then return tostring(value.Name) end
+	local function display(value)
+		if typeof(value) == "Instance" then
+			return value.Name
+		end
+		if typeof(value) == "table" and value.Name then
+			return tostring(value.Name)
+		end
 		return tostring(value)
 	end
 
-	local function isValidOption(value)
+	local function isValid(value)
 		for _, opt in ipairs(options) do
 			if opt == value then return true end
 		end
@@ -743,19 +1514,16 @@ function HackerUI:CreateDropdown(config)
 	end
 
 	local selected = options[1]
-	if config.Default ~= nil and isValidOption(config.Default) then
-		selected = config.Default
+	local wanted = config.Default
+	if wanted == nil then wanted = config.CurrentOption end
+	if wanted ~= nil and isValid(wanted) then
+		selected = wanted
 	end
 
-	local Row = new("Frame", {
-		Size = UDim2.new(1, 0, 0, 30),
-		BackgroundColor3 = Theme.Panel,
-		ClipsDescendants = false,
-		ZIndex = 2,
-		LayoutOrder = self._rowCount,
-		Parent = self.List,
-	}, { pad(0, 0, 10, 0, 10) })
-	self._rowCount += 1
+	local Row, window = baseRow(self, 30)
+	if not Row then return setmetatable({}, Stub) end
+	Row.ClipsDescendants = false
+	Row.ZIndex = 2
 
 	new("TextLabel", {
 		Text = config.Text or config.Name or "Opciones",
@@ -763,76 +1531,142 @@ function HackerUI:CreateDropdown(config)
 		TextSize = 12,
 		TextColor3 = Theme.TextDim,
 		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0.45, 0, 1, 0),
+		ZIndex = 2,
 		Parent = Row,
 	})
 
 	local SelectedLabel = new("TextLabel", {
-		Text = selected ~= nil and displayOption(selected) or "—",
+		Text = selected ~= nil and display(selected) or "-",
 		Font = Theme.FontBold,
 		TextSize = 12,
 		TextColor3 = Theme.Active,
 		TextXAlignment = Enum.TextXAlignment.Right,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
-		Position = UDim2.new(0.45, 10, 0, 0),
-		Size = UDim2.new(0.55, -10, 1, 0),
+		Position = UDim2.new(0.45, 8, 0, 0),
+		Size = UDim2.new(0.55, -8, 1, 0),
+		ZIndex = 2,
 		Parent = Row,
 	})
+	onAccent(function()
+		if SelectedLabel.Parent then
+			SelectedLabel.TextColor3 = Theme.Active
+		end
+	end)
 
-	local ClickOverlay = new("TextButton", { Text = "", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Parent = Row })
-
+	local visibleCount = math.min(math.max(#options, 1), 6)
 	local ListFrame = new("ScrollingFrame", {
-		Size = UDim2.new(1, 0, 0, math.min(#options, 5) * 26 + 8),
-		Position = UDim2.new(0, 0, 1, 2),
+		Size = UDim2.new(1, 20, 0, visibleCount * 24 + 8),
+		Position = UDim2.new(0, -10, 1, 2),
 		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
 		Visible = false,
-		ZIndex = 5,
+		ZIndex = 20,
 		ScrollBarThickness = 3,
-		ScrollBarImageColor3 = Theme.Active,
+		ScrollBarImageColor3 = Theme.Border,
 		CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		Parent = Row,
 	}, {
-		stroke(Theme.Border, 1), pad(4),
+		stroke(Theme.Border, 1),
+		pad(4),
 		new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
 	})
 
-	local Dropdown = setmetatable({ Value = selected, Callback = callback, Options = options, _threads = {} }, HackerUI)
+	local Dropdown = setmetatable({
+		Value = selected, Options = options,
+		Callback = callback, _threads = {},
+	}, UI)
 
 	function Dropdown:Set(option)
 		self.Value = option
-		SelectedLabel.Text = displayOption(option)
-		HackerUI.FlagValues[config.Flag] = option
-		safeCall(self, self.Callback, option)
+		SelectedLabel.Text = display(option)
+		UI.FlagValues[config.Flag] = option
+		return safeCall(self, self.Callback, option)
 	end
+
+	function Dropdown:Get()
+		return self.Value
+	end
+
 	function Dropdown:Stop()
 		stopAllThreads(self)
 	end
 
-	for _, optionValue in ipairs(options) do
-		local OptionBtn = new("TextButton", {
-			Text = displayOption(optionValue),
-			Font = Theme.Font,
-			TextSize = 12,
-			TextColor3 = Theme.Text,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-			ClipsDescendants = true,
-			BackgroundColor3 = Theme.Panel,
-			AutoButtonColor = false,
-			Size = UDim2.new(1, 0, 0, 24),
-			Parent = ListFrame,
-		}, { pad(0, 0, 6, 0, 6) })
-		hoverTint(OptionBtn, Theme.Panel, Theme.PanelAlt)
+	local function buildOptions()
+		for _, child in ipairs(ListFrame:GetChildren()) do
+			if child:IsA("TextButton") then
+				child:Destroy()
+			end
+		end
 
-		table.insert(self.Window._connections, OptionBtn.MouseButton1Click:Connect(function()
-			Dropdown:Set(optionValue)
-			ListFrame.Visible = false
-		end))
+		if #Dropdown.Options == 0 then
+			new("TextLabel", {
+				Text = "(vacío)",
+				Font = Theme.Font,
+				TextSize = 11,
+				TextColor3 = Theme.TextDim,
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 0, 22),
+				ZIndex = 21,
+				Parent = ListFrame,
+			})
+			return
+		end
+
+		for index, optionValue in ipairs(Dropdown.Options) do
+			local OptionBtn = new("TextButton", {
+				Text = display(optionValue),
+				Font = Theme.Font,
+				TextSize = 11,
+				TextColor3 = Theme.Text,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				AutoButtonColor = false,
+				BackgroundColor3 = Theme.Panel,
+				BorderSizePixel = 0,
+				Size = UDim2.new(1, 0, 0, 22),
+				LayoutOrder = index,
+				ZIndex = 21,
+				Parent = ListFrame,
+			}, { corner(3), pad(0, 0, 6, 0, 6) })
+
+			OptionBtn.MouseEnter:Connect(function()
+				tween(OptionBtn, { BackgroundColor3 = Theme.Row })
+			end)
+			OptionBtn.MouseLeave:Connect(function()
+				tween(OptionBtn, { BackgroundColor3 = Theme.Panel })
+			end)
+
+			table.insert(window._connections, OptionBtn.MouseButton1Click:Connect(function()
+				Dropdown:Set(optionValue)
+				ListFrame.Visible = false
+			end))
+		end
 	end
 
-	table.insert(self.Window._connections, ClickOverlay.MouseButton1Click:Connect(function()
+	-- Refrescar opciones en caliente (ej: lista de jugadores del servidor).
+	function Dropdown:Refresh(newOptions, keepSelection)
+		self.Options = newOptions or {}
+		options = self.Options
+		buildOptions()
+		local count = math.min(math.max(#self.Options, 1), 6)
+		ListFrame.Size = UDim2.new(1, 20, 0, count * 24 + 8)
+		if not keepSelection then
+			self.Value = self.Options[1]
+			SelectedLabel.Text = self.Value ~= nil and display(self.Value) or "-"
+		end
+	end
+	Dropdown.SetOptions = Dropdown.Refresh
+
+	buildOptions()
+
+	local Click = clickLayer(Row)
+	Click.ZIndex = 3
+	table.insert(window._connections, Click.MouseButton1Click:Connect(function()
 		ListFrame.Visible = not ListFrame.Visible
 	end))
 
@@ -841,65 +1675,140 @@ function HackerUI:CreateDropdown(config)
 end
 
 -- ============================================================
--- 	KEYBIND
+-- 	INPUT (caja de texto)
 -- ============================================================
-function HackerUI:CreateKeybind(config)
+function UI:CreateInput(config)
 	config = config or {}
 	local callback = resolveCallback(config)
-	local currentKey = config.Default or config.CurrentValue or Enum.KeyCode.RightShift
-	local listening = false
 
-	local Row = new("Frame", {
-		Size = UDim2.new(1, 0, 0, 30),
-		BackgroundColor3 = Theme.Panel,
-		LayoutOrder = self._rowCount,
-		Parent = self.List,
-	}, { pad(0, 0, 10, 0, 10) })
-	self._rowCount += 1
+	local Row, window = baseRow(self, 30)
+	if not Row then return setmetatable({}, Stub) end
 
 	new("TextLabel", {
-		Text = config.Text or config.Name or "Tecla",
+		Text = config.Text or config.Name or "Texto",
 		Font = Theme.Font,
-		TextSize = 13,
+		TextSize = 12,
 		TextColor3 = Theme.Text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, -70, 1, 0),
+		Size = UDim2.new(0.42, 0, 1, 0),
 		Parent = Row,
 	})
+
+	local Box = new("TextBox", {
+		Text = tostring(config.Default or config.CurrentValue or ""),
+		PlaceholderText = config.PlaceholderText or config.Placeholder or "...",
+		Font = Theme.Font,
+		TextSize = 11,
+		TextColor3 = Theme.Text,
+		PlaceholderColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ClearTextOnFocus = false,
+		ClipsDescendants = true,
+		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
+		Position = UDim2.new(0.44, 0, 0.5, -10),
+		Size = UDim2.new(0.56, 0, 0, 20),
+		Parent = Row,
+	}, { corner(3), stroke(Theme.Border, 1), pad(0, 0, 6, 0, 6) })
+
+	local Input = setmetatable({ Instance = Box, Value = Box.Text, Callback = callback, _threads = {} }, UI)
+
+	function Input:Set(text)
+		self.Value = tostring(text)
+		Box.Text = self.Value
+		UI.FlagValues[config.Flag] = self.Value
+		return safeCall(self, self.Callback, self.Value)
+	end
+
+	function Input:Get()
+		return Box.Text
+	end
+
+	function Input:Stop()
+		stopAllThreads(self)
+	end
+
+	table.insert(window._connections, Box.FocusLost:Connect(function(enterPressed)
+		if enterPressed or config.FireOnLoseFocus then
+			Input.Value = Box.Text
+			UI.FlagValues[config.Flag] = Box.Text
+			safeCall(Input, Input.Callback, Box.Text)
+		end
+	end))
+
+	registerFlag(config.Flag, Input, Box.Text)
+	return Input
+end
+
+-- ============================================================
+-- 	KEYBIND
+-- ============================================================
+function UI:CreateKeybind(config)
+	config = config or {}
+	local callback = resolveCallback(config)
+
+	local currentKey = config.Default or config.CurrentKeybind or Enum.KeyCode.RightShift
+	if typeof(currentKey) == "string" then
+		local ok, parsed = pcall(function()
+			return Enum.KeyCode[currentKey]
+		end)
+		currentKey = (ok and parsed) or Enum.KeyCode.RightShift
+	end
+
+	local listening = false
+
+	local Row, window = baseRow(self, 30)
+	if not Row then return setmetatable({}, Stub) end
+
+	rowLabel(Row, config.Text or config.Name or "Tecla", 66)
 
 	local KeyButton = new("TextButton", {
 		Text = currentKey.Name,
 		Font = Theme.FontBold,
 		TextSize = 11,
 		TextColor3 = Theme.Text,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 		AutoButtonColor = false,
 		BackgroundColor3 = Theme.PanelAlt,
+		BorderSizePixel = 0,
 		Size = UDim2.new(0, 60, 0, 20),
 		Position = UDim2.new(1, -60, 0.5, -10),
 		Parent = Row,
-	}, { stroke(Theme.Border, 1) })
+	}, { corner(3), stroke(Theme.Border, 1) })
 
-	local Keybind = setmetatable({ Value = currentKey, Callback = callback, _threads = {} }, HackerUI)
+	local Keybind = setmetatable({ Value = currentKey, Callback = callback, _threads = {} }, UI)
 
 	function Keybind:Set(keyCode)
+		if typeof(keyCode) == "string" then
+			local ok, parsed = pcall(function() return Enum.KeyCode[keyCode] end)
+			keyCode = (ok and parsed) or self.Value
+		end
 		self.Value = keyCode
 		KeyButton.Text = keyCode.Name
-		HackerUI.FlagValues[config.Flag] = keyCode
+		UI.FlagValues[config.Flag] = keyCode
 	end
+
+	function Keybind:Get()
+		return self.Value
+	end
+
 	function Keybind:Stop()
 		stopAllThreads(self)
 	end
 
-	table.insert(self.Window._connections, KeyButton.MouseButton1Click:Connect(function()
+	table.insert(window._connections, KeyButton.MouseButton1Click:Connect(function()
 		listening = true
 		KeyButton.Text = "..."
+		KeyButton.TextColor3 = Theme.Active
 	end))
 
-	table.insert(self.Window._connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	table.insert(window._connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if listening and input.UserInputType == Enum.UserInputType.Keyboard then
 			listening = false
+			KeyButton.TextColor3 = Theme.Text
 			Keybind:Set(input.KeyCode)
 			return
 		end
@@ -912,4 +1821,68 @@ function HackerUI:CreateKeybind(config)
 	return Keybind
 end
 
-return HackerUI
+-- ============================================================
+-- 	ESTADÍSTICA (número grande + etiqueta)
+-- ============================================================
+function UI:CreateStat(config)
+	config = config or {}
+	local list, _, owner = host(self)
+	if not list then return setmetatable({}, Stub) end
+
+	local holder = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 44),
+		BackgroundColor3 = Theme.Row,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(owner),
+		Parent = list,
+	}, { pad(0, 5, 10, 5, 10) })
+
+	local ValueLabel = new("TextLabel", {
+		Text = tostring(config.Value or "0"),
+		Font = Theme.FontBold,
+		TextSize = 20,
+		TextColor3 = Theme.Active,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 21),
+		Parent = holder,
+	})
+	onAccent(function()
+		if ValueLabel.Parent then
+			ValueLabel.TextColor3 = Theme.Active
+		end
+	end)
+
+	new("TextLabel", {
+		Text = config.Label or config.Text or config.Name or "",
+		Font = Theme.Font,
+		TextSize = 11,
+		TextColor3 = Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 0, 0, 21),
+		Size = UDim2.new(1, 0, 0, 13),
+		Parent = holder,
+	})
+
+	local Stat = setmetatable({ Instance = ValueLabel, Value = config.Value or "0" }, UI)
+
+	function Stat:Set(newValue)
+		self.Value = newValue
+		ValueLabel.Text = tostring(newValue)
+	end
+
+	registerFlag(config.Flag, Stat, config.Value)
+	return Stat
+end
+
+-- Compatibilidad con SugarUI: allá las estadísticas iban dentro de una
+-- fila horizontal. Acá van una debajo de otra (la columna es angosta),
+-- así que CreateStatRow simplemente devuelve el mismo contenedor.
+function UI:CreateStatRow()
+	return self
+end
+
+return UI
