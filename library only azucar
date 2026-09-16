@@ -143,16 +143,16 @@ end
 -- 	TEMA
 -- ============================================================
 local Theme = {
-	Rail      = Color3.fromRGB(12, 12, 14),
-	Header    = Color3.fromRGB(16, 16, 19),
-	Panel     = Color3.fromRGB(19, 19, 22),
-	PanelAlt  = Color3.fromRGB(30, 30, 35),
-	Row       = Color3.fromRGB(23, 23, 27),
-	Border    = Color3.fromRGB(48, 48, 54),
-	Text      = Color3.fromRGB(234, 234, 238),
-	TextDim   = Color3.fromRGB(146, 146, 154),
-	Active    = Color3.fromRGB(224, 48, 48),
-	ActiveDim = Color3.fromRGB(150, 30, 30),
+	Rail      = Color3.fromRGB(14, 14, 17),
+	Header    = Color3.fromRGB(19, 19, 23),
+	Panel     = Color3.fromRGB(17, 17, 20),
+	PanelAlt  = Color3.fromRGB(31, 31, 37),
+	Row       = Color3.fromRGB(24, 24, 29),
+	Border    = Color3.fromRGB(44, 44, 51),
+	Text      = Color3.fromRGB(238, 238, 242),
+	TextDim   = Color3.fromRGB(138, 138, 148),
+	Active    = Color3.fromRGB(226, 52, 52),
+	ActiveDim = Color3.fromRGB(152, 32, 32),
 	Font      = Enum.Font.Code,
 	FontBold  = Enum.Font.Code,
 }
@@ -414,9 +414,11 @@ function UI:CreateWindow(config)
 
 	local title    = config.Title or config.Name or "Azúcar Hub"
 	local subtitle = config.Subtitle or config.SubTitle or ""
-	local RAIL_W   = config.RailWidth or 46
-	local PANEL_W  = config.PanelWidth or 215
-	local HEADER_H = 30
+	-- Riel ancho: antes eran 46px y solo entraba la inicial (o peor, el
+	-- "rbxassetid://..." crudo del ícono). Ahora entra ícono + NOMBRE.
+	local RAIL_W   = config.RailWidth or 148
+	local PANEL_W  = config.PanelWidth or 275
+	local HEADER_H = 32
 	local TOP_Y    = config.TopOffset or 8
 
 	local ScreenGui = new("ScreenGui", {
@@ -449,20 +451,21 @@ function UI:CreateWindow(config)
 	-- ---------------- Cabecera con el NOMBRE ----------------
 	local Header = new("Frame", {
 		Name = "Header",
-		Size = UDim2.new(0, RAIL_W + PANEL_W, 0, HEADER_H),
+		Size = UDim2.new(0, RAIL_W + PANEL_W + 4, 0, HEADER_H),
 		Position = UDim2.new(0, 0, 0, TOP_Y),
 		BackgroundColor3 = Theme.Header,
 		BorderSizePixel = 0,
 		Parent = Root,
-	}, { stroke(Theme.Border, 1) })
+	}, { corner(6), stroke(Theme.Border, 1) })
 
 	local AccentBar = new("Frame", {
 		Name = "AccentBar",
-		Size = UDim2.new(0, 3, 1, 0),
+		Size = UDim2.new(0, 3, 0, 18),
+		Position = UDim2.new(0, 8, 0.5, -9),
 		BackgroundColor3 = Theme.Active,
 		BorderSizePixel = 0,
 		Parent = Header,
-	})
+	}, { corner(2) })
 	onAccent(function()
 		if AccentBar.Parent then
 			AccentBar.BackgroundColor3 = Theme.Active
@@ -478,7 +481,7 @@ function UI:CreateWindow(config)
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
-		Position = UDim2.new(0, 11, 0, 0),
+		Position = UDim2.new(0, 18, 0, 0),
 		Size = UDim2.new(1, -90, 1, 0),
 		Parent = Header,
 	})
@@ -494,8 +497,8 @@ function UI:CreateWindow(config)
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextTruncate = Enum.TextTruncate.AtEnd,
 			BackgroundTransparency = 1,
-			Position = UDim2.new(0, 11 + TitleLabel.Size.X.Offset + 6, 0, 0),
-			Size = UDim2.new(1, -(TitleLabel.Size.X.Offset + 105), 1, 0),
+			Position = UDim2.new(0, 18 + TitleLabel.Size.X.Offset + 6, 0, 0),
+			Size = UDim2.new(1, -(TitleLabel.Size.X.Offset + 112), 1, 0),
 			Parent = Header,
 		})
 	end
@@ -531,12 +534,12 @@ function UI:CreateWindow(config)
 	-- ---------------- Riel de pestañas ----------------
 	local Rail = new("Frame", {
 		Name = "Rail",
-		Size = UDim2.new(0, RAIL_W, 1, -(TOP_Y + HEADER_H + 10)),
-		Position = UDim2.new(0, 0, 0, TOP_Y + HEADER_H),
+		Size = UDim2.new(0, RAIL_W, 1, -(TOP_Y + HEADER_H + 14)),
+		Position = UDim2.new(0, 0, 0, TOP_Y + HEADER_H + 4),
 		BackgroundColor3 = Theme.Rail,
 		BorderSizePixel = 0,
 		Parent = Root,
-	}, { stroke(Theme.Border, 1) })
+	}, { corner(6), stroke(Theme.Border, 1) })
 
 	local RailList = new("ScrollingFrame", {
 		Name = "RailList",
@@ -567,7 +570,7 @@ function UI:CreateWindow(config)
 		BackgroundColor3 = Theme.Panel,
 		BorderSizePixel = 0,
 		Size = UDim2.new(0, PANEL_W, 0, 90),
-		Position = UDim2.new(0, RAIL_W, 0, TOP_Y + HEADER_H),
+		Position = UDim2.new(0, RAIL_W, 0, TOP_Y + HEADER_H + 4),
 		Parent = Root,
 	}, { stroke(Theme.Border, 1), pad(10) })
 
@@ -622,36 +625,12 @@ function UI:CreateWindow(config)
 	CloseBtn.MouseEnter:Connect(function() tween(CloseBtn, { BackgroundColor3 = Theme.Active }) end)
 	CloseBtn.MouseLeave:Connect(function() tween(CloseBtn, { BackgroundColor3 = Theme.PanelAlt }) end)
 
-	-- ---------------- Arrastrar desde la cabecera ----------------
-	do
-		local dragging, dragStart, startOffset = false, nil, nil
-
-		track(Header.InputBegan:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1
-				or input.UserInputType == Enum.UserInputType.Touch then
-				dragging = true
-				dragStart = input.Position
-				startOffset = Vector2.new(Header.Position.X.Offset, Header.Position.Y.Offset)
-			end
-		end))
-
-		track(UserInputService.InputChanged:Connect(function(input)
-			if not dragging then return end
-			if input.UserInputType ~= Enum.UserInputType.MouseMovement
-				and input.UserInputType ~= Enum.UserInputType.Touch then
-				return
-			end
-			local delta = input.Position - dragStart
-			Window:MoveTo(startOffset.X + delta.X, startOffset.Y + delta.Y)
-		end))
-
-		track(UserInputService.InputEnded:Connect(function(input)
-			if input.UserInputType == Enum.UserInputType.MouseButton1
-				or input.UserInputType == Enum.UserInputType.Touch then
-				dragging = false
-			end
-		end))
-	end
+	-- ---------------- Ventana FIJA ----------------
+	-- Antes la cabecera se podía arrastrar con el mouse. Se sacó a
+	-- propósito: la interfaz queda clavada en su lugar y no hay forma de
+	-- correrla sin querer mientras jugás. Si algún día la querés mover
+	-- desde código, Window:MoveTo(x, y) sigue existiendo.
+	Header.Active = false
 
 	-- ---------------- Tecla para abrir/cerrar ----------------
 	local toggleKey = config.ToggleKey or Enum.KeyCode.K
@@ -674,19 +653,19 @@ function UI:MoveTo(offsetX, offsetY)
 	self._originX = offsetX
 
 	self.Header.Position = UDim2.new(0, offsetX, 0, offsetY)
-	self.Rail.Position   = UDim2.new(0, offsetX, 0, offsetY + self.HEADER_H)
-	self.Rail.Size       = UDim2.new(0, self.RAIL_W, 1, -(offsetY + self.HEADER_H + 10))
+	self.Rail.Position   = UDim2.new(0, offsetX, 0, offsetY + self.HEADER_H + 4)
+	self.Rail.Size       = UDim2.new(0, self.RAIL_W, 1, -(offsetY + self.HEADER_H + 14))
 
 	if self.EmptyHint then
-		self.EmptyHint.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
+		self.EmptyHint.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H + 4)
 	end
 
 	for _, tab in ipairs(self._tabs) do
-		tab.Panel.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
-		tab.Panel.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 10))
+		tab.Panel.Position = UDim2.new(0, offsetX + self.RAIL_W + 4, 0, offsetY + self.HEADER_H + 4)
+		tab.Panel.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 14))
 		for _, group in pairs(tab._groupPanels) do
-			group.Instance.Position = UDim2.new(0, offsetX + self.RAIL_W + self.PANEL_W, 0, offsetY + self.HEADER_H)
-			group.Instance.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 10))
+			group.Instance.Position = UDim2.new(0, offsetX + self.RAIL_W + self.PANEL_W + 8, 0, offsetY + self.HEADER_H + 4)
+			group.Instance.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + 14))
 		end
 	end
 end
@@ -797,30 +776,110 @@ function UI:CreateTab(config)
 
 	local originX = self._originX or 0
 
-	-- Botón en el riel
+	-- Botón en el riel: barra de acento + cuadro de ícono + NOMBRE.
 	local TabBtn = new("TextButton", {
 		Name = name,
-		Text = config.Icon or string.upper(string.sub(name, 1, 1)),
-		Font = Theme.FontBold,
-		TextSize = 13,
-		TextColor3 = isFirst and Theme.Active or Theme.TextDim,
+		Text = "",
 		AutoButtonColor = false,
 		BackgroundColor3 = isFirst and Theme.PanelAlt or Theme.Panel,
 		BorderSizePixel = 0,
 		Size = UDim2.new(1, 0, 0, 34),
 		Parent = self.RailList,
-	}, { corner(3), stroke(Theme.Border, 1) })
+	}, { corner(4), stroke(Theme.Border, 1) })
+
+	-- Barrita de acento a la izquierda que marca cuál está abierta.
+	local TabMark = new("Frame", {
+		Name = "Mark",
+		Size = UDim2.new(0, 3, 0, 18),
+		Position = UDim2.new(0, 0, 0.5, -9),
+		BackgroundColor3 = Theme.Active,
+		BackgroundTransparency = isFirst and 0 or 1,
+		BorderSizePixel = 0,
+		Parent = TabBtn,
+	}, { corner(2) })
+	onAccent(function()
+		if TabMark.Parent then
+			TabMark.BackgroundColor3 = Theme.Active
+		end
+	end)
+
+	-- El ícono puede venir como LETRA/emoji o como IMAGEN. Si te pasan un
+	-- "rbxassetid://123", un "http://..." o solo los números, se arma un
+	-- ImageLabel. Antes eso se metía como texto y en el riel aparecía el
+	-- "id://44..." cortado, tapando el nombre de la pestaña.
+	local icon = config.Icon
+	local iconIsImage = false
+	local iconImage = icon
+
+	if typeof(icon) == "string" then
+		if icon:match("^rbxassetid://") or icon:match("^http") then
+			iconIsImage = true
+		elseif icon:match("^%d+$") then
+			iconIsImage = true
+			iconImage = "rbxassetid://" .. icon
+		end
+	elseif typeof(icon) == "number" then
+		iconIsImage = true
+		iconImage = "rbxassetid://" .. tostring(icon)
+	end
+
+	local IconBox
+	if iconIsImage then
+		IconBox = new("ImageLabel", {
+			Name = "Icon",
+			Image = iconImage,
+			ScaleType = Enum.ScaleType.Fit,
+			BackgroundColor3 = Theme.Rail,
+			BorderSizePixel = 0,
+			Size = UDim2.new(0, 22, 0, 22),
+			Position = UDim2.new(0, 9, 0.5, -11),
+			Parent = TabBtn,
+		}, { corner(4), pad(3) })
+	else
+		IconBox = new("TextLabel", {
+			Name = "Icon",
+			Text = (typeof(icon) == "string" and icon ~= "" and icon)
+				or string.upper(string.sub(name, 1, 1)),
+			Font = Theme.FontBold,
+			TextSize = 12,
+			TextColor3 = isFirst and Theme.Active or Theme.TextDim,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			ClipsDescendants = true,
+			BackgroundColor3 = Theme.Rail,
+			BorderSizePixel = 0,
+			Size = UDim2.new(0, 22, 0, 22),
+			Position = UDim2.new(0, 9, 0.5, -11),
+			Parent = TabBtn,
+		}, { corner(4) })
+	end
+
+	-- EL NOMBRE DE LA PESTAÑA (esto era lo que no aparecía por ningún lado)
+	local TabName = new("TextLabel", {
+		Name = "TabName",
+		Text = name,
+		Font = Theme.FontBold,
+		TextSize = 12,
+		TextColor3 = isFirst and Theme.Text or Theme.TextDim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ClipsDescendants = true,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 38, 0, 0),
+		Size = UDim2.new(1, -44, 1, 0),
+		Parent = TabBtn,
+	})
 
 	-- Panel de la pestaña
 	local Panel = new("Frame", {
 		Name = name .. "Panel",
-		Size = UDim2.new(0, self.PANEL_W, 1, -(self.TOP_Y + self.HEADER_H + 10)),
-		Position = UDim2.new(0, originX + self.RAIL_W, 0, self.TOP_Y + self.HEADER_H),
+		Size = UDim2.new(0, self.PANEL_W, 1, -(self.TOP_Y + self.HEADER_H + 14)),
+		Position = UDim2.new(0, originX + self.RAIL_W + 4, 0, self.TOP_Y + self.HEADER_H + 4),
 		BackgroundColor3 = Theme.Panel,
 		BorderSizePixel = 0,
+		ClipsDescendants = true,
 		Visible = isFirst,
 		Parent = self.Root,
-	}, { stroke(Theme.Border, 1) })
+	}, { corner(6), stroke(Theme.Border, 1) })
 
 	local PanelTitle = new("TextLabel", {
 		Name = "PanelTitle",
@@ -855,6 +914,10 @@ function UI:CreateTab(config)
 	local Tab = setmetatable({
 		Window       = self,
 		Button       = TabBtn,
+		Mark         = TabMark,
+		IconBox      = IconBox,
+		NameLabel    = TabName,
+		IconIsImage  = iconIsImage,
 		Panel        = Panel,
 		PanelTitle   = PanelTitle,
 		List         = List,
@@ -865,39 +928,23 @@ function UI:CreateTab(config)
 
 	onAccent(function()
 		if TabBtn.Parent and Panel.Visible then
-			TabBtn.TextColor3 = Theme.Active
+			TabMark.BackgroundColor3 = Theme.Active
+			if not iconIsImage then
+				IconBox.TextColor3 = Theme.Active
+			end
 		end
 	end)
 
-	-- En el riel solo entra la inicial de la pestaña. Este globito muestra
-	-- el nombre completo al pasar el mouse, así no hay que adivinar qué
-	-- es cada letra cuando tenés muchas pestañas.
-	local Tip = new("TextLabel", {
-		Name = "Tip",
-		Text = " " .. name .. " ",
-		Font = Theme.Font,
-		TextSize = 11,
-		TextColor3 = Theme.Text,
-		BackgroundColor3 = Theme.PanelAlt,
-		BorderSizePixel = 0,
-		AutomaticSize = Enum.AutomaticSize.X,
-		Size = UDim2.new(0, 0, 0, 20),
-		Position = UDim2.new(1, 6, 0.5, -10),
-		Visible = false,
-		ZIndex = 30,
-		Parent = TabBtn,
-	}, { corner(3), stroke(Theme.Border, 1) })
-
 	TabBtn.MouseEnter:Connect(function()
-		Tip.Visible = true
 		if not Panel.Visible then
 			tween(TabBtn, { BackgroundColor3 = Theme.PanelAlt })
+			TabName.TextColor3 = Theme.Text
 		end
 	end)
 	TabBtn.MouseLeave:Connect(function()
-		Tip.Visible = false
 		if not Panel.Visible then
 			tween(TabBtn, { BackgroundColor3 = Theme.Panel })
+			TabName.TextColor3 = Theme.TextDim
 		end
 	end)
 
@@ -912,13 +959,26 @@ end
 function UI:SelectTab(name)
 	for _, tab in ipairs(self._tabs or {}) do
 		local selected = (tab.Name == name)
+
 		tab.Panel.Visible = selected
-		tab.Button.TextColor3 = selected and Theme.Active or Theme.TextDim
 		tab.Button.BackgroundColor3 = selected and Theme.PanelAlt or Theme.Panel
+
+		if tab.Mark then
+			tab.Mark.BackgroundTransparency = selected and 0 or 1
+			tab.Mark.BackgroundColor3 = Theme.Active
+		end
+		if tab.NameLabel then
+			tab.NameLabel.TextColor3 = selected and Theme.Text or Theme.TextDim
+		end
+		if tab.IconBox and not tab.IconIsImage then
+			tab.IconBox.TextColor3 = selected and Theme.Active or Theme.TextDim
+		end
+
 		if not selected then
 			for _, group in pairs(tab._groupPanels) do
 				group.Instance.Visible = false
 				group.Arrow.Text = ">"
+				group.Arrow.TextColor3 = Theme.TextDim
 			end
 		end
 	end
@@ -962,13 +1022,14 @@ function UI:CreateGroup(config)
 
 	local GroupPanel = new("Frame", {
 		Name = name .. "GroupPanel",
-		Size = UDim2.new(0, window.PANEL_W, 1, -(window.TOP_Y + window.HEADER_H + 10)),
-		Position = UDim2.new(0, originX + window.RAIL_W + window.PANEL_W, 0, window.TOP_Y + window.HEADER_H),
+		Size = UDim2.new(0, window.PANEL_W, 1, -(window.TOP_Y + window.HEADER_H + 14)),
+		Position = UDim2.new(0, originX + window.RAIL_W + window.PANEL_W + 8, 0, window.TOP_Y + window.HEADER_H + 4),
 		BackgroundColor3 = Theme.Panel,
 		BorderSizePixel = 0,
+		ClipsDescendants = true,
 		Visible = false,
 		Parent = window.Root,
-	}, { stroke(Theme.Border, 1) })
+	}, { corner(6), stroke(Theme.Border, 1) })
 
 	local GroupTitle = new("TextLabel", {
 		Text = string.upper(name),
@@ -1522,8 +1583,12 @@ function UI:CreateDropdown(config)
 
 	local Row, window = baseRow(self, 30)
 	if not Row then return setmetatable({}, Stub) end
-	Row.ClipsDescendants = false
+	Row.ClipsDescendants = true
 	Row.ZIndex = 2
+
+	-- Caja compartida para que listHeight() lea siempre las opciones
+	-- actuales, incluso después de un :Refresh().
+	local Dropdown_Options_Ref = { options }
 
 	new("TextLabel", {
 		Text = config.Text or config.Name or "Opciones",
@@ -1533,7 +1598,7 @@ function UI:CreateDropdown(config)
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
-		Size = UDim2.new(0.45, 0, 1, 0),
+		Size = UDim2.new(0.45, 0, 0, 30),
 		ZIndex = 2,
 		Parent = Row,
 	})
@@ -1547,7 +1612,20 @@ function UI:CreateDropdown(config)
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0.45, 8, 0, 0),
-		Size = UDim2.new(0.55, -8, 1, 0),
+		Size = UDim2.new(0.55, -22, 0, 30),
+		ZIndex = 2,
+		Parent = Row,
+	})
+
+	-- Indicador de abierto/cerrado del acordeón.
+	local Arrow = new("TextLabel", {
+		Text = "+",
+		Font = Theme.FontBold,
+		TextSize = 13,
+		TextColor3 = Theme.TextDim,
+		BackgroundTransparency = 1,
+		Position = UDim2.new(1, -12, 0, 0),
+		Size = UDim2.new(0, 12, 0, 30),
 		ZIndex = 2,
 		Parent = Row,
 	})
@@ -1557,10 +1635,18 @@ function UI:CreateDropdown(config)
 		end
 	end)
 
-	local visibleCount = math.min(math.max(#options, 1), 6)
+	-- ACORDEÓN, no lista flotante: al abrirse, la fila CRECE y la lista
+	-- vive adentro. Una lista flotante quedaba cortada por el panel con
+	-- scroll y no se podían ver las últimas opciones.
+	local ROW_H = 30
+	local function listHeight()
+		local count = math.min(math.max(#Dropdown_Options_Ref[1], 1), 6)
+		return count * 24 + 8
+	end
+
 	local ListFrame = new("ScrollingFrame", {
-		Size = UDim2.new(1, 20, 0, visibleCount * 24 + 8),
-		Position = UDim2.new(0, -10, 1, 2),
+		Size = UDim2.new(1, 20, 0, math.min(math.max(#options, 1), 6) * 24 + 8),
+		Position = UDim2.new(0, -10, 0, ROW_H),
 		BackgroundColor3 = Theme.PanelAlt,
 		BorderSizePixel = 0,
 		Visible = false,
@@ -1652,9 +1738,11 @@ function UI:CreateDropdown(config)
 	function Dropdown:Refresh(newOptions, keepSelection)
 		self.Options = newOptions or {}
 		options = self.Options
+		Dropdown_Options_Ref[1] = self.Options
 		buildOptions()
-		local count = math.min(math.max(#self.Options, 1), 6)
-		ListFrame.Size = UDim2.new(1, 20, 0, count * 24 + 8)
+		local h = listHeight()
+		ListFrame.Size = UDim2.new(1, 20, 0, h)
+		Row.Size = UDim2.new(1, 0, 0, ListFrame.Visible and (ROW_H + h + 4) or ROW_H)
 		if not keepSelection then
 			self.Value = self.Options[1]
 			SelectedLabel.Text = self.Value ~= nil and display(self.Value) or "-"
@@ -1666,8 +1754,18 @@ function UI:CreateDropdown(config)
 
 	local Click = clickLayer(Row)
 	Click.ZIndex = 3
+	Click.Size = UDim2.new(1, 0, 0, ROW_H)
+
+	local function setOpen(open)
+		ListFrame.Visible = open
+		local h = listHeight()
+		ListFrame.Size = UDim2.new(1, 20, 0, h)
+		Row.Size = UDim2.new(1, 0, 0, open and (ROW_H + h + 4) or ROW_H)
+		Arrow.Text = open and "-" or "+"
+	end
+
 	table.insert(window._connections, Click.MouseButton1Click:Connect(function()
-		ListFrame.Visible = not ListFrame.Visible
+		setOpen(not ListFrame.Visible)
 	end))
 
 	registerFlag(config.Flag, Dropdown, selected)
