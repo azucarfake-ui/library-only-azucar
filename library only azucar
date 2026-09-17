@@ -1,5 +1,5 @@
 --[[
-	AzucarHackerUI  v2.1.0
+	AzucarHackerUI  v2.0.0
 	======================
 	Panel estilo exploit: riel angosto de pestañas a la izquierda, cada
 	pestaña abre su columna de filas, y las filas de tipo "Grupo" abren
@@ -15,42 +15,30 @@
 		Increment | Step             → salto del slider
 		Callback | Logic = TuTabla   → lógica a ejecutar
 
-	NOVEDADES DE ESTA VERSIÓN (v2.1.0):
+	POR QUÉ ANTES NO SE VEÍA NADA (arreglado acá):
 
-	1. PANEL UN POCO MÁS ALTO, extendido hacia arriba.
-	   Antes el panel arrancaba justo en el borde de la zona segura
-	   (debajo de la barra de Roblox), que era lo más alto posible sin
-	   tocar esa reserva. Ahora el ScreenGui usa IgnoreGuiInset = true y
-	   arranca a solo config.TopOffset (20px por defecto) del borde REAL
-	   de la pantalla, así que gana algo de alto extra por arriba. Si en
-	   tu juego eso choca visualmente con los íconos de Roblox (chat,
-	   mochila, etc.), subí ese número desde CreateWindow({ TopOffset = ... }).
+	1. Todo quedaba TAPADO por la barra superior de Roblox.
+	   El ScreenGui usaba IgnoreGuiInset = true y el panel arrancaba en
+	   y = 0, así que el título de la pestaña y los primeros botones del
+	   riel quedaban debajo de la barra de Roblox (chat, menú, etc.).
+	   Ahora hay un margen superior real y el inset se respeta.
 
-	2. ANIMACIÓN DE APERTURA: entra deslizándose desde la izquierda.
-	   Cada vez que se abre el panel (Window:Show() / :Toggle() cuando
-	   estaba oculto), la cabecera, el riel y la columna (o columnas, si
-	   hay un Grupo abierto) que estén visibles en ese momento arrancan
-	   corridos hacia la izquierda (fuera de pantalla) y se deslizan con
-	   un tween hasta su posición normal. Cada pieza recuerda su propia
-	   posición "de origen" (guardada una sola vez al crearse) para poder
-	   volver ahí sin desarmarse.
+	2. La ventana NO tenía título en ningún lado.
+	   No existía ningún elemento que mostrara config.Title — por eso
+	   "ni el mismo nombre" aparecía. Ahora hay una cabecera propia.
 
-	3. ROJO CON BRILLO TIPO VIDRIO/REFLEJO.
-	   Los elementos que usan el color de acento como una BARRA sólida
-	   (la rayita de la cabecera, la marca de la pestaña activa, el
-	   cuadradito de los Toggles, y el relleno de los Sliders) ahora
-	   llevan encima una capa fina de brillo: un degradado blanco que se
-	   desvanece de arriba hacia abajo, dando el efecto de una superficie
-	   que refleja luz en vez de un color plano. Esa capa no bloquea
-	   clicks (Active = false) y sigue la forma redondeada del elemento
-	   debajo.
+	3. Faltaban la MITAD de los componentes.
+	   No existían CreateSection, CreateLabel, CreateParagraph,
+	   CreateInput, CreateDivider, CreateStat, CreateProfile, Notify...
+	   Si tu script de lógica llamaba a cualquiera de esos, Lua cortaba
+	   la ejecución ahí mismo con "attempt to call a nil value" y la UI
+	   se quedaba vacía para siempre — exactamente el síntoma que viste:
+	   un panel abierto, sin toggles, sin sliders, sin nada.
 
-	POR QUÉ ANTES NO SE VEÍA NADA (arreglado en v2.0.0, se mantiene):
-
-	1. Todo quedaba TAPADO por la barra superior de Roblox — resuelto.
-	2. La ventana NO tenía título en ningún lado — resuelto.
-	3. Faltaban la MITAD de los componentes — resuelto.
-	4. RED DE SEGURIDAD: un Create... inexistente ya no rompe el script.
+	4. RED DE SEGURIDAD nueva: si aun así llamás a un método Create...
+	   que no existe, la librería ya NO rompe el script. Avisa por
+	   consola con warn() y devuelve un objeto inofensivo, así el resto
+	   de tus 4500 líneas se sigue construyendo igual.
 
 	Uso básico:
 
@@ -85,7 +73,7 @@ local UserInputService  = game:GetService("UserInputService")
 
 local UI = {}
 
-UI.Version    = "2.1.0"
+UI.Version    = "2.0.0"
 UI.Windows    = {}
 UI.Flags      = {}
 UI.FlagValues = {}
@@ -93,6 +81,10 @@ UI.FlagValues = {}
 -- ============================================================
 -- 	RED DE SEGURIDAD: un Create... inexistente no mata el script
 -- ============================================================
+-- Objeto tonto: responde a CUALQUIER método devolviendo otro objeto
+-- tonto. Sirve para que una cadena como
+--    Tab:CreateLoQueSea({...}):Set(true)
+-- no explote aunque "CreateLoQueSea" no exista en esta librería.
 local Stub = {}
 Stub.__index = function()
 	return function()
@@ -163,6 +155,8 @@ local Theme = {
 	ActiveDim = Color3.fromRGB(152, 32, 32),
 	Font      = Enum.Font.Code,
 	FontBold  = Enum.Font.Code,
+	-- 0 = esquinas rectas en toda la UI. Subilo si alguna vez las querés
+	-- redondeadas otra vez.
 	CornerRadius = 0,
 }
 UI.Theme = Theme
@@ -176,6 +170,10 @@ local Palettes = {
 UI.Palettes = Palettes
 UI.CurrentPalette = "Rojo"
 
+-- Todo lo que se pinta con el color de acento se anota acá con la
+-- función exacta que necesita para repintarse. SetAccentColor recorre la
+-- lista con un pcall por entrada: si un elemento ya fue destruido, el
+-- resto de la interfaz igual se repinta entera.
 local accentListeners = {}
 
 local function onAccent(fn)
@@ -197,6 +195,11 @@ local function new(class, props, children)
 	return inst
 end
 
+-- Bordes CUADRADOS en toda la interfaz. Se controla desde acá: dejando
+-- Theme.CornerRadius en 0, todas las esquinas quedan rectas sin tener
+-- que tocar una por una las decenas de llamadas a corner() que hay
+-- repartidas por el archivo. Si algún día querés volver a redondear,
+-- cambiás ese único número.
 local function corner(radius)
 	local r = Theme.CornerRadius or 0
 	if r <= 0 then
@@ -223,6 +226,9 @@ local function tween(inst, props, time)
 	return inst
 end
 
+-- Hover que lee el color EN EL MOMENTO del evento (no el que tenía
+-- cuando se creó el elemento), así nunca se queda pegado con el acento
+-- viejo después de un cambio de paleta.
 local function hoverRow(obj)
 	obj.MouseEnter:Connect(function()
 		tween(obj, { BackgroundColor3 = Theme.PanelAlt })
@@ -239,44 +245,6 @@ local function hoverAccent(obj)
 	obj.MouseLeave:Connect(function()
 		tween(obj, { BackgroundColor3 = Theme.Active })
 	end)
-end
-
--- Capa de "brillo" tipo vidrio/reflejo para poner ENCIMA de una barra de
--- color sólido (la rayita de acento, la marca de pestaña, el cuadrado
--- del Toggle, el relleno del Slider...). Es un degradado blanco que va
--- de semi-opaco arriba a transparente abajo, simulando que la superficie
--- refleja luz en vez de ser un color plano. Active = false para que
--- nunca bloquee clicks del elemento de abajo, y copia el UICorner del
--- padre si tiene uno, para que el brillo respete las esquinas.
-local function glossy(inst, rotation)
-	if not inst then return nil end
-
-	local shine = new("Frame", {
-		Name = "Shine",
-		BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-		BorderSizePixel = 0,
-		Size = UDim2.new(1, 0, 1, 0),
-		ZIndex = (inst.ZIndex or 1) + 1,
-		Parent = inst,
-	}, {
-		new("UIGradient", {
-			Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(255, 255, 255)),
-			Transparency = NumberSequence.new({
-				NumberSequenceKeypoint.new(0.00, 0.45),
-				NumberSequenceKeypoint.new(0.45, 0.82),
-				NumberSequenceKeypoint.new(1.00, 1.00),
-			}),
-			Rotation = rotation or 90,
-		}),
-	})
-	shine.Active = false
-
-	local parentCorner = inst:FindFirstChildOfClass("UICorner")
-	if parentCorner then
-		new("UICorner", { CornerRadius = parentCorner.CornerRadius }).Parent = shine
-	end
-
-	return shine
 end
 
 function UI:SetAccentColor(paletteName)
@@ -296,6 +264,10 @@ end
 -- ============================================================
 -- 	NÚCLEO: CALLBACKS EN HILOS INDEPENDIENTES (SIN LÍMITE)
 -- ============================================================
+-- Cada disparo de un callback vive en su propio hilo y se anota en el
+-- CONJUNTO controller._threads. Podés disparar el mismo control muchas
+-- veces seguidas, o varios controles a la vez: ninguna lógica pisa a
+-- otra, ninguna congela la interfaz, y :Stop() las corta TODAS.
 local function safeCall(controller, fn, ...)
 	fn = fn or function() end
 	if typeof(fn) ~= "function" then
@@ -337,6 +309,8 @@ local function stopAllThreads(controller)
 	controller._threads = {}
 end
 
+-- Acepta Callback = function(...), o Logic = tabla con
+-- :Enable/:Disable/:Toggle/:Set/:Run, o una función suelta.
 local function resolveCallback(config)
 	if typeof(config.Callback) == "function" then
 		return config.Callback
@@ -383,6 +357,10 @@ local function registerFlag(flagName, controller, initialValue)
 	UI.FlagValues[flagName] = initialValue
 end
 
+-- Guardar el valor de una flag SIN reventar cuando el control no tiene
+-- Flag. En Lua, "tabla[nil] = valor" lanza "table index is nil" y mata
+-- el hilo ahí mismo: cualquier Toggle/Slider/Dropdown creado sin Flag
+-- (o sea, la mayoría) se rompía apenas lo tocabas.
 local function setFlagValue(flagName, value)
 	if flagName == nil then
 		return
@@ -390,6 +368,9 @@ local function setFlagValue(flagName, value)
 	UI.FlagValues[flagName] = value
 end
 
+-- Devuelve el contenedor donde va la fila y la ventana dueña, sin
+-- importar si el método se llamó sobre un Tab, sobre un Grupo, o por
+-- error sobre la propia ventana.
 local function host(self)
 	if self.List then
 		return self.List, (self.Window or self), self
@@ -449,26 +430,6 @@ local function clickLayer(row)
 end
 
 -- ============================================================
--- 	ANIMACIÓN DE APERTURA: deslizar desde la izquierda
--- ============================================================
--- Corre "inst" desde una posición corrida hacia la izquierda (fuera de
--- pantalla) hasta su "homePos" (la posición normal, guardada una sola
--- vez al crearse). Se usa en Window:Show() para la cabecera, el riel, y
--- la(s) columna(s) que estén visibles en ese momento.
-local function slideInFromLeft(inst, homePos, distance, delay)
-	if not inst or not homePos then return end
-	local startPos = UDim2.new(homePos.X.Scale, homePos.X.Offset - distance, homePos.Y.Scale, homePos.Y.Offset)
-	inst.Position = startPos
-	task.delay(delay or 0, function()
-		if inst.Parent then
-			TweenService:Create(inst, TweenInfo.new(0.32, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
-				Position = homePos,
-			}):Play()
-		end
-	end)
-end
-
--- ============================================================
 -- 	CREATE WINDOW
 -- ============================================================
 function UI:CreateWindow(config)
@@ -476,17 +437,18 @@ function UI:CreateWindow(config)
 
 	local title    = config.Title or config.Name or "Azúcar Hub"
 	local subtitle = config.Subtitle or config.SubTitle or ""
+	-- Riel ancho: antes eran 46px y solo entraba la inicial (o peor, el
+	-- "rbxassetid://..." crudo del ícono). Ahora entra ícono + NOMBRE.
 	local RAIL_W   = config.RailWidth or 148
 	local PANEL_W  = config.PanelWidth or 275
 	local HEADER_H = 32
-	-- Antes: 0, respetando el todo el inset de Roblox (quedaba pegado
-	-- justo debajo de la barra superior — lo más alto posible sin
-	-- ignorar esa reserva). Ahora, con IgnoreGuiInset = true más abajo,
-	-- este valor se mide desde el borde REAL de la pantalla, así que un
-	-- número chico (20 por defecto) deja el panel notablemente más alto
-	-- que antes sin pegarlo del todo al borde. Subilo si en tu juego
-	-- llega a chocar con los íconos propios de Roblox.
-	local TOP_Y    = config.TopOffset or 20
+	-- Más arriba: antes arrancaba en 8px por debajo del borde del área
+	-- útil. Ahora queda pegada al tope.
+	local TOP_Y    = config.TopOffset or 0
+	-- Único margen que queda: un colchón chico abajo para que el panel
+	-- no se pase del borde de la pantalla. Todo lo demás (cabecera-riel,
+	-- riel-panel, panel-grupo) va a 0: sin separación, para que no se
+	-- vea nada del fondo del juego colándose entre los bloques.
 	local BOTTOM_MARGIN = config.BottomMargin or 2
 
 	local ScreenGui = new("ScreenGui", {
@@ -494,13 +456,10 @@ function UI:CreateWindow(config)
 		ResetOnSpawn = false,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		DisplayOrder = 999,
-		-- true: reclama el espacio que Roblox reserva para su propia
-		-- barra superior, para que el panel pueda estirarse un poco más
-		-- hacia arriba (ver TOP_Y arriba). Antes era false a propósito
-		-- para no quedar tapado; ahora que arranca más abajo del borde
-		-- real (TOP_Y = 20, no 0 pegado al inset), no debería chocar con
-		-- los íconos de Roblox en el uso normal.
-		IgnoreGuiInset = true,
+		-- false a propósito: así Roblox baja el contenido por debajo de
+		-- su propia barra superior y el título/las pestañas dejan de
+		-- quedar tapados (era el motivo de que "no se viera nada" arriba).
+		IgnoreGuiInset = false,
 	})
 
 	local protectGui = rawget(_G, "protectgui") or rawget(_G, "protect_gui")
@@ -509,6 +468,9 @@ function UI:CreateWindow(config)
 	end
 	ScreenGui.Parent = getGuiParent()
 
+	-- Raíz a pantalla completa y transparente: los paneles se ubican
+	-- adentro por offset y nunca quedan recortados por los bordes de un
+	-- contenedor angosto.
 	local Root = new("Frame", {
 		Name = "Root",
 		Size = UDim2.new(1, 0, 1, 0),
@@ -525,7 +487,6 @@ function UI:CreateWindow(config)
 		BorderSizePixel = 0,
 		Parent = Root,
 	}, { corner(6), stroke(Theme.Border, 1) })
-	local HeaderHome = Header.Position
 
 	local AccentBar = new("Frame", {
 		Name = "AccentBar",
@@ -535,7 +496,6 @@ function UI:CreateWindow(config)
 		BorderSizePixel = 0,
 		Parent = Header,
 	}, { corner(2) })
-	glossy(AccentBar)
 	onAccent(function()
 		if AccentBar.Parent then
 			AccentBar.BackgroundColor3 = Theme.Active
@@ -573,6 +533,8 @@ function UI:CreateWindow(config)
 		})
 	end
 
+	-- En vez de los botones "—" y "X" va el sello de la librería.
+	-- Para abrir/cerrar el panel se usa la tecla K (o config.ToggleKey).
 	local BrandLabel = new("TextLabel", {
 		Name = "Brand",
 		Text = "Azucar UI",
@@ -602,7 +564,6 @@ function UI:CreateWindow(config)
 		BorderSizePixel = 0,
 		Parent = Root,
 	}, { corner(6), stroke(Theme.Border, 1) })
-	local RailHome = Rail.Position
 
 	local RailList = new("ScrollingFrame", {
 		Name = "RailList",
@@ -619,6 +580,9 @@ function UI:CreateWindow(config)
 		pad(0, 6, 5, 6, 5),
 	})
 
+	-- ---------------- Aviso "sin pestañas todavía" ----------------
+	-- Si tu script muere antes de crear la primera pestaña, esto te lo
+	-- dice en pantalla en vez de dejarte un panel negro mudo.
 	local EmptyHint = new("TextLabel", {
 		Name = "EmptyHint",
 		Text = "Sin pestañas.\nRevisá la consola (F9):\nalgo cortó tu script\nantes de crearlas.",
@@ -634,6 +598,7 @@ function UI:CreateWindow(config)
 		Parent = Root,
 	}, { stroke(Theme.Border, 1), pad(10) })
 
+	-- ---------------- Notificaciones ----------------
 	local NotifyHolder = new("Frame", {
 		Name = "Notifications",
 		Size = UDim2.new(0, 250, 1, -20),
@@ -652,11 +617,9 @@ function UI:CreateWindow(config)
 		ScreenGui   = ScreenGui,
 		Root        = Root,
 		Header      = Header,
-		HeaderHome  = HeaderHome,
 		TitleLabel  = TitleLabel,
 		SubLabel    = SubLabel,
 		Rail        = Rail,
-		RailHome    = RailHome,
 		RailList    = RailList,
 		EmptyHint   = EmptyHint,
 		NotifyHolder = NotifyHolder,
@@ -675,8 +638,14 @@ function UI:CreateWindow(config)
 		return conn
 	end
 
+	-- ---------------- Ventana FIJA ----------------
+	-- Antes la cabecera se podía arrastrar con el mouse. Se sacó a
+	-- propósito: la interfaz queda clavada en su lugar y no hay forma de
+	-- correrla sin querer mientras jugás. Si algún día la querés mover
+	-- desde código, Window:MoveTo(x, y) sigue existiendo.
 	Header.Active = false
 
+	-- ---------------- Tecla para abrir/cerrar ----------------
 	local toggleKey = config.ToggleKey or Enum.KeyCode.K
 	track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		if gameProcessed then return end
@@ -697,10 +666,8 @@ function UI:MoveTo(offsetX, offsetY)
 	self._originX = offsetX
 
 	self.Header.Position = UDim2.new(0, offsetX, 0, offsetY)
-	self.HeaderHome = self.Header.Position
 	self.Rail.Position   = UDim2.new(0, offsetX, 0, offsetY + self.HEADER_H)
 	self.Rail.Size       = UDim2.new(0, self.RAIL_W, 1, -(offsetY + self.HEADER_H + self.BOTTOM_MARGIN))
-	self.RailHome = self.Rail.Position
 
 	if self.EmptyHint then
 		self.EmptyHint.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
@@ -709,11 +676,9 @@ function UI:MoveTo(offsetX, offsetY)
 	for _, tab in ipairs(self._tabs) do
 		tab.Panel.Position = UDim2.new(0, offsetX + self.RAIL_W, 0, offsetY + self.HEADER_H)
 		tab.Panel.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + self.BOTTOM_MARGIN))
-		tab.PanelHome = tab.Panel.Position
 		for _, group in pairs(tab._groupPanels) do
 			group.Instance.Position = UDim2.new(0, offsetX + self.RAIL_W + self.PANEL_W, 0, offsetY + self.HEADER_H)
 			group.Instance.Size     = UDim2.new(0, self.PANEL_W, 1, -(offsetY + self.HEADER_H + self.BOTTOM_MARGIN))
-			group.HomePos = group.Instance.Position
 		end
 	end
 end
@@ -724,32 +689,9 @@ function UI:SetTitle(text)
 	end
 end
 
--- Reproduce la entrada deslizante desde la izquierda para la cabecera, el
--- riel, y la columna (o columnas) visibles en este momento. Cada pieza
--- arranca un poquito más tarde que la anterior (un delay chiquito) para
--- que se sienta como una sola tira entrando, no todo de golpe.
-function UI:_playOpenAnimation()
-	local distance = self.RAIL_W + self.PANEL_W + 80
-
-	slideInFromLeft(self.Header, self.HeaderHome, distance, 0)
-	slideInFromLeft(self.Rail, self.RailHome, distance, 0.03)
-
-	for _, tab in ipairs(self._tabs or {}) do
-		if tab.Panel.Visible then
-			slideInFromLeft(tab.Panel, tab.PanelHome, distance, 0.06)
-		end
-		for _, group in pairs(tab._groupPanels or {}) do
-			if group.Instance.Visible then
-				slideInFromLeft(group.Instance, group.HomePos, distance, 0.09)
-			end
-		end
-	end
-end
-
 function UI:Show()
 	self.Root.Visible = true
 	self._visible = true
-	self:_playOpenAnimation()
 end
 
 function UI:Hide()
@@ -777,19 +719,13 @@ function UI:Notify(config)
 		Parent = holder,
 	}, { corner(4), stroke(Theme.Border, 1), pad(8) })
 
-	local strip = new("Frame", {
+	new("Frame", {
 		Size = UDim2.new(0, 2, 1, 0),
 		Position = UDim2.new(0, -8, 0, -8),
 		BackgroundColor3 = Theme.Active,
 		BorderSizePixel = 0,
 		Parent = card,
 	})
-	glossy(strip, 0)
-	onAccent(function()
-		if strip.Parent then
-			strip.BackgroundColor3 = Theme.Active
-		end
-	end)
 
 	new("TextLabel", {
 		Text = config.Title or "Aviso",
@@ -853,6 +789,7 @@ function UI:CreateTab(config)
 
 	local originX = self._originX or 0
 
+	-- Botón en el riel: barra de acento + cuadro de ícono + NOMBRE.
 	local TabBtn = new("TextButton", {
 		Name = name,
 		Text = "",
@@ -863,6 +800,7 @@ function UI:CreateTab(config)
 		Parent = self.RailList,
 	}, { corner(4), stroke(Theme.Border, 1) })
 
+	-- Barrita de acento a la izquierda que marca cuál está abierta.
 	local TabMark = new("Frame", {
 		Name = "Mark",
 		Size = UDim2.new(0, 3, 0, 18),
@@ -872,13 +810,16 @@ function UI:CreateTab(config)
 		BorderSizePixel = 0,
 		Parent = TabBtn,
 	}, { corner(2) })
-	glossy(TabMark)
 	onAccent(function()
 		if TabMark.Parent then
 			TabMark.BackgroundColor3 = Theme.Active
 		end
 	end)
 
+	-- El ícono puede venir como LETRA/emoji o como IMAGEN. Si te pasan un
+	-- "rbxassetid://123", un "http://..." o solo los números, se arma un
+	-- ImageLabel. Antes eso se metía como texto y en el riel aparecía el
+	-- "id://44..." cortado, tapando el nombre de la pestaña.
 	local icon = config.Icon
 	local iconIsImage = false
 	local iconImage = icon
@@ -925,6 +866,7 @@ function UI:CreateTab(config)
 		}, { corner(4) })
 	end
 
+	-- EL NOMBRE DE LA PESTAÑA (esto era lo que no aparecía por ningún lado)
 	local TabName = new("TextLabel", {
 		Name = "TabName",
 		Text = name,
@@ -940,6 +882,7 @@ function UI:CreateTab(config)
 		Parent = TabBtn,
 	})
 
+	-- Panel de la pestaña
 	local Panel = new("Frame", {
 		Name = name .. "Panel",
 		Size = UDim2.new(0, self.PANEL_W, 1, -(self.TOP_Y + self.HEADER_H + self.BOTTOM_MARGIN)),
@@ -950,7 +893,6 @@ function UI:CreateTab(config)
 		Visible = isFirst,
 		Parent = self.Root,
 	}, { corner(6), stroke(Theme.Border, 1) })
-	local PanelHome = Panel.Position
 
 	local PanelTitle = new("TextLabel", {
 		Name = "PanelTitle",
@@ -990,7 +932,6 @@ function UI:CreateTab(config)
 		NameLabel    = TabName,
 		IconIsImage  = iconIsImage,
 		Panel        = Panel,
-		PanelHome    = PanelHome,
 		PanelTitle   = PanelTitle,
 		List         = List,
 		Name         = name,
@@ -1102,7 +1043,6 @@ function UI:CreateGroup(config)
 		Visible = false,
 		Parent = window.Root,
 	}, { corner(6), stroke(Theme.Border, 1) })
-	local GroupPanelHome = GroupPanel.Position
 
 	local GroupTitle = new("TextLabel", {
 		Text = string.upper(name),
@@ -1139,7 +1079,7 @@ function UI:CreateGroup(config)
 
 	local siblings = owner._groupPanels or self._groupPanels
 	if siblings then
-		siblings[name] = { Instance = GroupPanel, Arrow = Arrow, HomePos = GroupPanelHome }
+		siblings[name] = { Instance = GroupPanel, Arrow = Arrow }
 	end
 
 	local Click = clickLayer(Row)
@@ -1155,15 +1095,11 @@ function UI:CreateGroup(config)
 		GroupPanel.Visible = not GroupPanel.Visible
 		Arrow.Text = GroupPanel.Visible and "<" or ">"
 		Arrow.TextColor3 = GroupPanel.Visible and Theme.Active or Theme.TextDim
-		if GroupPanel.Visible then
-			slideInFromLeft(GroupPanel, GroupPanelHome, window.RAIL_W + window.PANEL_W + 80, 0)
-		end
 	end))
 
 	return setmetatable({
 		Window       = window,
 		Panel        = GroupPanel,
-		PanelHome    = GroupPanelHome,
 		List         = GroupList,
 		Name         = name,
 		_rowCount    = 0,
@@ -1209,6 +1145,7 @@ function UI:CreateSection(config)
 	return controller
 end
 
+-- Alias: mucha gente lo llama CreateSectionLabel (así se llamaba en SugarUI).
 function UI:CreateSectionLabel(config)
 	return self:CreateSection(config)
 end
@@ -1399,7 +1336,6 @@ function UI:CreateToggle(config)
 		BorderSizePixel = 0,
 		Parent = Row,
 	}, { corner(3), stroke(Theme.Border, 1) })
-	glossy(Box)
 
 	local Toggle = setmetatable({ Box = Box, Value = state, Callback = callback, _threads = {} }, UI)
 
@@ -1477,6 +1413,9 @@ function UI:CreateSlider(config)
 	local Row, window = baseRow(self, 42)
 	if not Row then return setmetatable({}, Stub) end
 
+	-- El slider es más alto que una fila normal, así que necesita su
+	-- propio margen vertical. Se cambia el padding con cuidado: si por lo
+	-- que sea la fila no trajera uno, no se revienta acá.
 	local oldPad = Row:FindFirstChildOfClass("UIPadding")
 	if oldPad then
 		oldPad:Destroy()
@@ -1530,7 +1469,6 @@ function UI:CreateSlider(config)
 		BorderSizePixel = 0,
 		Parent = Track,
 	}, { corner(2) })
-	glossy(Fill)
 	onAccent(function()
 		if Fill.Parent then
 			Fill.BackgroundColor3 = Theme.Active
@@ -1574,6 +1512,10 @@ function UI:CreateSlider(config)
 		stopAllThreads(self)
 	end
 
+	-- Arrastre aislado: el listener de movimiento es global, así que cada
+	-- slider comprueba que el mouse esté sobre SU propio riel antes de
+	-- moverse. Y el fin del arrastre se detecta con InputEnded (que
+	-- siempre dispara), nunca con input.Changed.
 	local dragging = false
 
 	local function setFromX(xPos)
@@ -1657,6 +1599,8 @@ function UI:CreateDropdown(config)
 	Row.ClipsDescendants = true
 	Row.ZIndex = 2
 
+	-- Caja compartida para que listHeight() lea siempre las opciones
+	-- actuales, incluso después de un :Refresh().
 	local Dropdown_Options_Ref = { options }
 
 	new("TextLabel", {
@@ -1686,6 +1630,7 @@ function UI:CreateDropdown(config)
 		Parent = Row,
 	})
 
+	-- Indicador de abierto/cerrado del acordeón.
 	local Arrow = new("TextLabel", {
 		Text = "+",
 		Font = Theme.FontBold,
@@ -1703,6 +1648,9 @@ function UI:CreateDropdown(config)
 		end
 	end)
 
+	-- ACORDEÓN, no lista flotante: al abrirse, la fila CRECE y la lista
+	-- vive adentro. Una lista flotante quedaba cortada por el panel con
+	-- scroll y no se podían ver las últimas opciones.
 	local ROW_H = 30
 	local function listHeight()
 		local count = math.min(math.max(#Dropdown_Options_Ref[1], 1), 6)
@@ -1747,6 +1695,8 @@ function UI:CreateDropdown(config)
 		stopAllThreads(self)
 	end
 
+	-- Declarada acá arriba para que el clic de cada opción pueda cerrar
+	-- el acordeón (se define más abajo, cuando ya existe todo lo que usa).
 	local setOpen
 
 	local function buildOptions()
@@ -1796,6 +1746,10 @@ function UI:CreateDropdown(config)
 
 			table.insert(window._connections, OptionBtn.MouseButton1Click:Connect(function()
 				Dropdown:Set(optionValue)
+				-- Cerrar el acordeón COMPLETO. Antes solo se ocultaba la
+				-- lista, pero la fila quedaba estirada y dejaba un hueco
+				-- vacío enorme en el panel. Esto pasaba siempre, pero se
+				-- notaba sobre todo en las listas de jugadores.
 				if setOpen then
 					setOpen(false)
 				else
@@ -1805,6 +1759,7 @@ function UI:CreateDropdown(config)
 		end
 	end
 
+	-- Refrescar opciones en caliente (ej: lista de jugadores del servidor).
 	function Dropdown:Refresh(newOptions, keepSelection)
 		self.Options = newOptions or {}
 		options = self.Options
@@ -2046,6 +2001,9 @@ function UI:CreateStat(config)
 	return Stat
 end
 
+-- Compatibilidad con SugarUI: allá las estadísticas iban dentro de una
+-- fila horizontal. Acá van una debajo de otra (la columna es angosta),
+-- así que CreateStatRow simplemente devuelve el mismo contenedor.
 function UI:CreateStatRow()
 	return self
 end
